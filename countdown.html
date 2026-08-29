@@ -109,24 +109,24 @@
   <div class="head"><span>Precision Countdown</span><span class="led" id="led"></span></div>
 
   <div class="readout">
-    <div class="digits" id="digits">00:30<span class="tenth">.0</span></div>
+    <div class="digits" id="digits">--:--<span class="tenth">.-</span></div>
     <div class="sub" id="sub"></div>
     <div class="bar"><span id="bar"></span></div>
   </div>
 
   <div class="tabs" role="tablist">
-    <button id="tabDur" role="tab" aria-selected="true">Duration</button>
-    <button id="tabTgt" role="tab" aria-selected="false">Target time</button>
+    <button id="tabTgt" role="tab" aria-selected="true">Target time</button>
+    <button id="tabDur" role="tab" aria-selected="false">Duration</button>
   </div>
 
-  <div class="setter" id="setDur">
-    <label for="dur">Seconds</label>
-    <input id="dur" type="number" min="0.1" step="0.1" value="30">
-  </div>
-
-  <div class="setter hidden" id="setTgt">
+  <div class="setter" id="setTgt">
     <label for="tgt">Count to</label>
     <input id="tgt" type="datetime-local" step="1">
+  </div>
+
+  <div class="setter hidden" id="setDur">
+    <label for="dur">Seconds</label>
+    <input id="dur" type="number" min="0.1" step="0.1" value="30">
   </div>
 
   <div class="diag">
@@ -577,7 +577,7 @@ const flash = new FlashAlert(el.flash);
 const cue = new BigCue(el.cue);
 const beeper = new Beeper(() => el.beepOn.checked);
 
-let mode = 'duration';
+let mode = 'target';
 let targetEpoch = null;
 
 const clock = new ClockSync().onChange(c => {
@@ -724,8 +724,11 @@ el.sync.onclick   = async () => {
   el.sync.textContent = 'Sync'; el.sync.disabled = false;
 };
 
-/* default target: one minute out, formatted for datetime-local */
-const seed = new Date(Date.now() + 60000 - new Date().getTimezoneOffset() * 60000);
+/* Default target: the next whole minute at least 30 s away. A round
+   boundary is what a wall-clock deadline usually is, and the 30 s
+   floor keeps the seed from landing seconds after page load. */
+const seedMs = Math.ceil((Date.now() + 30000) / 60000) * 60000;
+const seed = new Date(seedMs - new Date(seedMs).getTimezoneOffset() * 60000);
 el.tgt.value = seed.toISOString().slice(0, 19);
 
 /* rAF probe, independent of the countdown loop */
@@ -740,7 +743,7 @@ let frames = 0, mark = performance.now();
   requestAnimationFrame(probe);
 })();
 
-apply();
+setMode('target');                              // opens on the wall-clock deadline
 clock.sync();                                   // sync on load
 setInterval(() => clock.sync({ samples: 3 }), 5 * 60 * 1000);  // hold discipline
 </script>
