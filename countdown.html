@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Precision Countdown</title>
+<style>
+  :root{
+    --bg:#0E1216; --panel:#161C22; --line:#243039;
+    --phos:#4FD9E8; --amber:#E8B24F; --red:#E86A5A;
+    --dim:#6B7A85; --fg:#E8EEF2;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--fg);
+    font-family:ui-monospace,"SF Mono",Menlo,"JetBrains Mono",monospace;
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .unit{width:100%;max-width:440px;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;
+    position:relative;z-index:1}
+  .head{display:flex;justify-content:space-between;align-items:center;
+    padding:10px 14px;border-bottom:1px solid var(--line);
+    font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+  .led{width:7px;height:7px;border-radius:50%;background:var(--line);transition:background .15s}
+  .led.on{background:var(--phos);box-shadow:0 0 8px var(--phos)}
+  .led.done{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+
+  .readout{padding:30px 14px 20px;text-align:center}
+  .digits{font-size:clamp(38px,12vw,54px);font-weight:500;line-height:1;
+    font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;
+    letter-spacing:-.01em;color:var(--phos);white-space:nowrap}
+  .digits .tenth{color:var(--fg);opacity:.55;font-size:.6em}
+  .digits.expired{color:var(--amber)}
+  .sub{margin-top:10px;font-size:10px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--dim);min-height:12px}
+  .bar{height:2px;background:var(--line);margin:20px 0 0;position:relative}
+  .bar span{position:absolute;inset:0 auto 0 0;background:var(--phos);width:100%}
+
+  .tabs{display:flex;gap:1px;background:var(--line);border-top:1px solid var(--line)}
+  .tabs button{flex:1;background:var(--panel);color:var(--dim)}
+  .tabs button[aria-selected="true"]{background:#1D252C;color:var(--phos)}
+
+  .diag{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line)}
+  .diag div{padding:9px 4px;text-align:center;border-right:1px solid var(--line)}
+  .diag div:last-child{border-right:none}
+  .diag b{display:block;font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
+  .diag i{font-style:normal;font-size:8px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--dim)}
+  .diag b.warn{color:var(--amber)} .diag b.bad{color:var(--red)}
+
+  .controls{display:flex;gap:1px;background:var(--line);border-top:1px solid var(--line)}
+  button{flex:1;appearance:none;border:0;background:var(--panel);color:var(--fg);
+    font:inherit;font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    padding:13px 4px;cursor:pointer}
+  button:hover:not(:disabled){background:#1D252C}
+  button:focus-visible{outline:2px solid var(--phos);outline-offset:-2px}
+  button:disabled{color:#3A464F;cursor:default}
+
+  .setter{display:flex;align-items:center;gap:10px;padding:12px 14px;
+    border-top:1px solid var(--line);font-size:10px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--dim)}
+  .setter.hidden{display:none}
+  .setter label{flex-shrink:0}
+  input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);
+    color:var(--fg);font:inherit;font-size:13px;padding:6px 8px;border-radius:3px}
+  input[type=number]{text-align:right;flex:0 0 90px}
+  input:focus{outline:1px solid var(--phos)}
+  .note{padding:0 14px 12px;font-size:9px;line-height:1.6;color:var(--dim);
+    letter-spacing:.04em}
+
+  .opt{display:flex;align-items:center;gap:9px;padding:11px 14px;
+    border-top:1px solid var(--line);font-size:10px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--dim);cursor:pointer}
+  .opt input{flex:0 0 auto;width:14px;height:14px;accent-color:var(--phos);cursor:pointer}
+
+  /* layer 0: full-bleed flash behind the instrument
+     layer 1: the unit, untouched and fully opaque
+     layer 2: a low-alpha wash so the flash reads across the panel too */
+  #flash{position:fixed;inset:0;z-index:0;background:var(--flash-c,#000);display:none}
+  #flashWash{position:fixed;inset:0;z-index:2;background:var(--flash-c,transparent);
+    opacity:.20;pointer-events:none;display:none}
+  #flashHint{position:fixed;left:0;right:0;bottom:5vh;z-index:3;margin:0;
+    text-align:center;font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+    color:#fff;mix-blend-mode:difference;pointer-events:none;display:none}
+
+  /* layer 4: final-seconds cue. Hollow stroke, so the readout on the
+     panel underneath stays legible straight through the numeral. */
+  #cue{position:fixed;inset:0;z-index:4;display:none;
+    align-items:center;justify-content:center;pointer-events:none}
+  body.cueing #cue{display:flex}
+  #cue b{font-weight:600;line-height:.78;font-size:clamp(150px,52vw,300px);
+    letter-spacing:-.05em;font-variant-numeric:tabular-nums;
+    color:transparent;-webkit-text-stroke:2px #fff;
+    mix-blend-mode:difference}
+  #cue b.word{font-size:clamp(56px,18vw,120px);letter-spacing:.1em;
+    color:#fff;-webkit-text-stroke:0}
+
+  body.flashing #flash,body.flashing #flashWash,body.flashing #flashHint{display:block}
+  body.flashing #flash{cursor:pointer}
+  body.flashing .unit{border-color:rgba(255,255,255,.35)}
+
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="unit">
+  <div class="head"><span>Precision Countdown</span><span class="led" id="led"></span></div>
+
+  <div class="readout">
+    <div class="digits" id="digits">00:30<span class="tenth">.0</span></div>
+    <div class="sub" id="sub"></div>
+    <div class="bar"><span id="bar"></span></div>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button id="tabDur" role="tab" aria-selected="true">Duration</button>
+    <button id="tabTgt" role="tab" aria-selected="false">Target time</button>
+  </div>
+
+  <div class="setter" id="setDur">
+    <label for="dur">Seconds</label>
+    <input id="dur" type="number" min="0.1" step="0.1" value="30">
+  </div>
+
+  <div class="setter hidden" id="setTgt">
+    <label for="tgt">Count to</label>
+    <input id="tgt" type="datetime-local" step="1">
+  </div>
+
+  <div class="diag">
+    <div><b id="fps">—</b><i>rAF fps</i></div>
+    <div><b id="offset">—</b><i>offset ms</i></div>
+    <div><b id="unc">—</b><i>± ms</i></div>
+    <div><b id="skew">—</b><i>ppm</i></div>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn">Start</button>
+    <button id="pauseBtn" disabled>Pause</button>
+    <button id="resetBtn">Reset</button>
+    <button id="syncBtn">Sync</button>
+  </div>
+
+  <label class="opt" for="flashOn">
+    <input type="checkbox" id="flashOn" checked>
+    Flash alert at zero
+  </label>
+
+  <p class="note" id="srcNote">Clock source: local device</p>
+</div>
+
+<div id="flash" aria-hidden="true"></div>
+<div id="flashWash" aria-hidden="true"></div>
+<div id="cue" aria-hidden="true"><b></b></div>
+<p id="flashHint" role="alert" aria-live="assertive">Tap or press Esc to dismiss</p>
+
+<script>
+/* =================================================================
+   1. ClockSync — network time discipline
+   -----------------------------------------------------------------
+   Browsers cannot speak NTP. NTP is UDP/123 and a page has no UDP
+   socket, so this uses Cristian's algorithm over HTTPS, which is the
+   same offset maths NTP uses minus the stratum hierarchy:
+
+       t0     = perf clock before request
+       T      = timestamp reported by the server
+       t1     = perf clock after response
+       rtt    = t1 - t0
+       offset = T + rtt/2 - t1        (assumes symmetric path)
+
+   Several samples are taken and the one with the LOWEST rtt wins.
+   That is NTP's own filter: the fastest round trip has the least
+   path asymmetry, so it carries the smallest hidden error.
+
+   The result is stored as `base`, an epoch value pinned to the
+   performance.now() origin. Every later time read is
+   base + performance.now(), so the reading stays monotonic even if
+   the OS clock is stepped mid-countdown.
+   ================================================================= */
+
+const SOURCES = [
+  { name: 'Cloudflare trace',
+    url: 'https://cloudflare.com/cdn-cgi/trace',
+    async parse(res) {
+      const m = (await res.text()).match(/^ts=([\d.]+)/m);
+      if (!m) throw new Error('no ts');
+      return parseFloat(m[1]) * 1000;          // microsecond precision
+    } },
+  { name: 'timeapi.io',
+    url: 'https://timeapi.io/api/Time/current/zone?timeZone=UTC',
+    async parse(res) {
+      const j = await res.json();
+      const t = Date.parse(j.dateTime.endsWith('Z') ? j.dateTime : j.dateTime + 'Z');
+      if (!Number.isFinite(t)) throw new Error('bad dateTime');
+      return t;                                 // millisecond precision
+    } },
+  { name: 'worldtimeapi.org',
+    url: 'https://worldtimeapi.org/api/timezone/Etc/UTC',
+    async parse(res) {
+      const j = await res.json();
+      return Date.parse(j.utc_datetime);        // microsecond precision
+    } },
+  { name: 'HTTP Date header',
+    url: 'https://cloudflare.com/cdn-cgi/trace',
+    async parse(res) {
+      const d = res.headers.get('date');        // 1 s granularity only
+      if (!d) throw new Error('Date header not exposed by CORS');
+      return Date.parse(d) + 500;               // centre the 1 s bucket
+    } }
+];
+
+class ClockSync {
+  base = Date.now() - performance.now();   // epoch at perf origin
+  uncertainty = Infinity;
+  source = 'local device';
+  granularity = 0;
+  skewPpm = null;
+  #history = [];
+  #onChange = null;
+
+  onChange(fn) { this.#onChange = fn; return this; }
+
+  now() { return this.base + performance.now(); }
+
+  async #sample(src) {
+    const t0 = performance.now();
+    const res = await fetch(src.url, { cache: 'no-store', mode: 'cors' });
+    const t1 = performance.now();
+    const serverMs = await src.parse(res);
+    // Cristian: assume the reply took half the round trip to reach us
+    return { base: serverMs + (t1 - t0) / 2 - t1, rtt: t1 - t0 };
+  }
+
+  async sync({ samples = 5 } = {}) {
+    for (const src of SOURCES) {
+      const good = [];
+      for (let i = 0; i < samples; i++) {
+        try { good.push(await this.#sample(src)); }
+        catch { break; }
+        await new Promise(r => setTimeout(r, 120));  // avoid burst throttling
+      }
+      if (!good.length) continue;
+
+      // minimum-delay filter: fastest round trip is the least distorted
+      const best = good.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+      const prev = this.#history.at(-1);
+
+      this.base = best.base;
+      this.uncertainty = best.rtt / 2;
+      this.source = src.name;
+      this.granularity = src.name === 'HTTP Date header' ? 1000 : 1;
+
+      // two syncs apart in time expose the local crystal's rate error
+      if (prev && performance.now() - prev.at > 60000) {
+        const elapsed = performance.now() - prev.at;
+        this.skewPpm = ((this.base - prev.base) / elapsed) * 1e6;
+      }
+      this.#history.push({ base: this.base, at: performance.now() });
+      this.#onChange?.(this);
+      return this;
+    }
+    this.source = 'local device (all sources unreachable)';
+    this.#onChange?.(this);
+    return this;
+  }
+}
+
+/* =================================================================
+   2. HiResCountdown — the deadline is always absolute
+   -----------------------------------------------------------------
+   The deadline lives in the performance.now() domain. A duration
+   deadline is now + ms. A wall-clock target is converted once:
+       endPerf = targetEpoch - clock.base
+   so a resync that moves `base` simply retargets the same loop and
+   the display corrects on the next frame.
+   ================================================================= */
+
+const TENTH = 100;
+
+class HiResCountdown {
+  #end = 0; #remaining = 0; #rafId = null; #safety = null;
+  #running = false; #lastStep = -1;
+
+  constructor(handlers = {}) {
+    Object.assign(this, handlers);
+    document.addEventListener('visibilitychange', this.#resync);
+  }
+
+  get running() { return this.#running; }
+  get remaining() { return this.#running ? Math.max(0, this.#end - performance.now()) : this.#remaining; }
+
+  load(ms, span) { this.span = span ?? ms; this.#remaining = Math.max(0, ms);
+    this.#running = false; this.#stop(); this.#lastStep = -1; this.#emit(this.#remaining); }
+
+  start() {
+    if (this.#running || this.#remaining <= 0) return;
+    this.#running = true;
+    this.#end = performance.now() + this.#remaining;
+    this.#safety = setTimeout(() => this.#frame(), this.#remaining + 20);
+    this.onState?.('running');
+    this.#frame();
+  }
+
+  // called after a resync: move the deadline, keep the loop alive
+  retarget(endPerf) {
+    if (this.#running) { this.#end = endPerf; this.#lastStep = -1; this.#frame(); }
+    else { this.#remaining = Math.max(0, endPerf - performance.now()); this.#lastStep = -1; this.#emit(this.#remaining); }
+  }
+
+  pause() {
+    if (!this.#running) return;
+    this.#remaining = this.remaining;
+    this.#stop(); this.#running = false; this.onState?.('paused');
+  }
+
+  destroy() { this.#stop(); document.removeEventListener('visibilitychange', this.#resync); }
+
+  #stop() {
+    if (this.#rafId !== null) cancelAnimationFrame(this.#rafId);
+    if (this.#safety !== null) clearTimeout(this.#safety);
+    this.#rafId = this.#safety = null;
+  }
+
+  // rAF is parked in a hidden tab; the deadline is still authoritative
+  #resync = () => { if (this.#running && !document.hidden) this.#frame(); };
+
+  #frame = () => {
+    const remaining = Math.max(0, this.#end - performance.now());
+    this.#emit(remaining);
+    if (remaining === 0) {
+      this.#stop(); this.#running = false; this.#remaining = 0;
+      this.onState?.('done'); this.onComplete?.();
+      return;
+    }
+    this.#rafId = requestAnimationFrame(this.#frame);
+  };
+
+  #emit(remaining) {
+    const step = Math.ceil(remaining / TENTH);   // 0.0 shows only at true zero
+    if (step === this.#lastStep) return;
+    this.#lastStep = step;
+    this.onTick?.(remaining, step);
+  }
+}
+
+/* =================================================================
+   3. FlashAlert — red/blue alert that does not hide the readout
+   -----------------------------------------------------------------
+   Three stacked layers instead of one covering overlay:
+
+     z0  #flash      full-bleed colour, behind everything
+     z1  .unit       the instrument, opaque and untouched
+     z2  #flashWash  same colour at 20% alpha, pointer-events none
+
+   The wash lets the colour read across the panel so the alert still
+   feels full-screen, while the digits keep their original contrast
+   against #161C22. Both layers read one CSS custom property, so a
+   phase change is a single write on the root element rather than
+   two style mutations.
+
+   Rate is deliberately capped. WCAG 2.3.1 sets the threshold at
+   3 flashes per second, and saturated red gets its own stricter
+   clause because red-to-blue transitions are the highest-risk
+   pattern for photosensitive epilepsy. A full-bleed layer is far
+   past the small-area exemption, so rate is the only lever left:
+
+     PERIOD 250 ms per colour -> 2 flash cycles per second
+     colours held off full saturation (#B32B26 / #1E3FA8)
+
+   Driven by the same rAF + absolute-deadline discipline as the
+   countdown, so the 5 s duration and the phase boundaries stay
+   exact rather than accumulating per-frame error.
+   ================================================================= */
+
+const FLASH = { RED:'#B32B26', BLUE:'#1E3FA8', PERIOD:250, DURATION:5000 };
+
+class FlashAlert {
+  #raf = null; #start = 0; #end = 0; #phase = -1; #reduced = false;
+
+  constructor(plate) {
+    plate.addEventListener('click', () => this.stop());
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') this.stop(); });
+  }
+
+  #paint(colour) { document.documentElement.style.setProperty('--flash-c', colour); }
+
+  fire() {
+    this.#reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.#start = performance.now();
+    this.#end = this.#start + FLASH.DURATION;
+    this.#phase = -1;
+    document.body.classList.add('flashing');
+    // reduced-motion users get the same 5 s alert as a steady field, no strobe
+    if (this.#reduced) this.#paint(FLASH.RED);
+    this.#tick();
+  }
+
+  stop() {
+    if (this.#raf !== null) cancelAnimationFrame(this.#raf);
+    this.#raf = null;
+    document.body.classList.remove('flashing');
+    this.#paint('transparent');
+    cue.hide();
+  }
+
+  #tick = () => {
+    const now = performance.now();
+    if (now >= this.#end) return this.stop();
+    if (!this.#reduced) {
+      const phase = Math.floor((now - this.#start) / FLASH.PERIOD) % 2;
+      if (phase !== this.#phase) {          // one write per phase, not per frame
+        this.#phase = phase;
+        this.#paint(phase ? FLASH.BLUE : FLASH.RED);
+      }
+    }
+    this.#raf = requestAnimationFrame(this.#tick);
+  };
+}
+
+/* =================================================================
+   4. BigCue — 5 4 3 2 1 NOW
+   -----------------------------------------------------------------
+   No timer of its own. The value is derived from the countdown's
+   own remaining time on every tick:
+
+       secs = Math.ceil(remaining / 1000)
+
+   so the cue cannot drift away from the readout, and a resync that
+   moves the deadline moves the cue with it. The ceil is what makes
+   4.9 s read "5" and 0.1 s read "1", with NOW reserved for zero.
+
+   Numerals render as a hollow stroke rather than solid fill, so the
+   MM:SS.T readout stays legible through the middle of the numeral.
+   ================================================================= */
+
+class BigCue {
+  #node; #last = null; #hold = null;
+
+  constructor(node) { this.#node = node; }
+
+  show(text, { word = false, holdMs = 0 } = {}) {
+    if (text === this.#last) return;          // one write per second, not per frame
+    this.#last = text;
+    clearTimeout(this.#hold);
+    this.#node.textContent = text;
+    this.#node.classList.toggle('word', word);
+    document.body.classList.add('cueing');
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      this.#node.animate(
+        [{ transform:'scale(1.22)', opacity:0 }, { transform:'scale(1)', opacity:1 }],
+        { duration:200, easing:'cubic-bezier(.2,.9,.3,1)' }
+      );
+    }
+    if (holdMs) this.#hold = setTimeout(() => this.hide(), holdMs);
+  }
+
+  hide() {
+    clearTimeout(this.#hold);
+    this.#last = null;
+    document.body.classList.remove('cueing');
+  }
+}
+
+/* ================= formatting ================= */
+
+function format(step) {
+  const tenth = step % 10;
+  let s = Math.floor(step / 10);
+  const sec = s % 60; s = (s - sec) / 60;
+  const min = s % 60; s = (s - min) / 60;
+  const hr  = s % 24;
+  const day = (s - hr) / 24;
+  const p = n => String(n).padStart(2, '0');
+  const main = day ? `${day}d ${p(hr)}:${p(min)}:${p(sec)}`
+             : hr  ? `${p(hr)}:${p(min)}:${p(sec)}`
+             :       `${p(min)}:${p(sec)}`;
+  return { main, tenth };
+}
+
+/* ================= wiring ================= */
+
+const $ = id => document.getElementById(id);
+const el = {
+  digits:$('digits'), sub:$('sub'), bar:$('bar'), led:$('led'),
+  fps:$('fps'), offset:$('offset'), unc:$('unc'), skew:$('skew'),
+  start:$('startBtn'), pause:$('pauseBtn'), reset:$('resetBtn'), sync:$('syncBtn'),
+  dur:$('dur'), tgt:$('tgt'), tabDur:$('tabDur'), tabTgt:$('tabTgt'),
+  setDur:$('setDur'), setTgt:$('setTgt'), note:$('srcNote'),
+  flash:$('flash'), flashOn:$('flashOn'), cue:document.querySelector('#cue b')
+};
+
+const flash = new FlashAlert(el.flash);
+const cue = new BigCue(el.cue);
+
+let mode = 'duration';
+let targetEpoch = null;
+
+const clock = new ClockSync().onChange(c => {
+  const drift = c.base - (Date.now() - performance.now());   // device error
+  el.offset.textContent = Number.isFinite(drift) ? (drift >= 0 ? '+' : '') + drift.toFixed(0) : '—';
+  el.offset.className = Math.abs(drift) > 1000 ? 'bad' : Math.abs(drift) > 100 ? 'warn' : '';
+  el.unc.textContent = c.uncertainty === Infinity ? '—' : c.uncertainty.toFixed(0);
+  el.skew.textContent = c.skewPpm === null ? '—' : c.skewPpm.toFixed(1);
+  el.note.textContent = `Clock source: ${c.source}` +
+    (c.granularity === 1000 ? ' — 1 s granularity, offset is approximate' : '');
+  if (mode === 'target' && targetEpoch !== null) apply();   // deadline follows the sync
+});
+
+const timer = new HiResCountdown({
+  onTick: (remaining, step) => {
+    const f = format(step);
+    el.digits.innerHTML = `${f.main}<span class="tenth">.${f.tenth}</span>`;
+    el.bar.style.width = (remaining / timer.span * 100).toFixed(3) + '%';
+
+    const secs = Math.ceil(remaining / 1000);
+    if (timer.running && secs >= 1 && secs <= 5) cue.show(String(secs));
+    else if (secs > 5) cue.hide();
+  },
+  onState: setState,
+  onComplete: () => {
+    navigator.vibrate?.([120, 60, 120]);
+    cue.show('NOW', { word: true, holdMs: FLASH.DURATION });
+    if (el.flashOn.checked) flash.fire();
+  }
+});
+
+function setState(state) {
+  el.led.className = 'led' + (state === 'running' ? ' on' : state === 'done' ? ' done' : '');
+  el.digits.classList.toggle('expired', state === 'done');
+  el.start.disabled = state === 'running' || state === 'done';
+  el.pause.disabled = state !== 'running';
+  el.start.textContent = state === 'paused' ? 'Resume' : 'Start';
+}
+
+function apply() {
+  if (mode === 'duration') {
+    const ms = Math.round((parseFloat(el.dur.value) || 1) * 1000);
+    timer.load(ms);
+    el.sub.textContent = '';
+  } else {
+    if (!el.tgt.value) { el.sub.textContent = 'Pick a target time'; return; }
+    targetEpoch = new Date(el.tgt.value).getTime();      // local wall time
+    const remaining = targetEpoch - clock.now();
+    if (timer.running) timer.retarget(targetEpoch - clock.base);
+    else timer.load(remaining, Math.max(remaining, 1));
+    el.sub.textContent = new Date(targetEpoch).toLocaleString(undefined,
+      { dateStyle: 'medium', timeStyle: 'medium' }) + ` · ±${clock.uncertainty === Infinity ? '?' : clock.uncertainty.toFixed(0)} ms`;
+  }
+  setState('idle');
+}
+
+function setMode(next) {
+  mode = next;
+  el.tabDur.setAttribute('aria-selected', next === 'duration');
+  el.tabTgt.setAttribute('aria-selected', next === 'target');
+  el.setDur.classList.toggle('hidden', next !== 'duration');
+  el.setTgt.classList.toggle('hidden', next !== 'target');
+  apply();
+}
+
+el.tabDur.onclick = () => setMode('duration');
+el.tabTgt.onclick = () => setMode('target');
+el.start.onclick  = () => { flash.stop(); timer.start(); };
+el.pause.onclick  = () => { cue.hide(); timer.pause(); };
+el.reset.onclick  = () => { flash.stop(); cue.hide(); timer.pause(); apply(); };
+el.dur.onchange   = apply;
+el.tgt.onchange   = apply;
+el.sync.onclick   = async () => {
+  el.sync.textContent = '···'; el.sync.disabled = true;
+  await clock.sync();
+  el.sync.textContent = 'Sync'; el.sync.disabled = false;
+};
+
+/* default target: one minute out, formatted for datetime-local */
+const seed = new Date(Date.now() + 60000 - new Date().getTimezoneOffset() * 60000);
+el.tgt.value = seed.toISOString().slice(0, 19);
+
+/* rAF probe, independent of the countdown loop */
+let frames = 0, mark = performance.now();
+(function probe(){
+  frames++;
+  const now = performance.now();
+  if (now - mark >= 1000) {
+    el.fps.textContent = Math.round(frames * 1000 / (now - mark));
+    frames = 0; mark = now;
+  }
+  requestAnimationFrame(probe);
+})();
+
+apply();
+clock.sync();                                   // sync on load
+setInterval(() => clock.sync({ samples: 3 }), 5 * 60 * 1000);  // hold discipline
+</script>
+</body>
+</html>
