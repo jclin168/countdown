@@ -8,6 +8,7 @@
   :root{
     --bg:#0E1216; --panel:#161C22; --line:#243039;
     --phos:#4FD9E8; --amber:#E8B24F; --red:#E86A5A;
+    --idle:#7A8A95;
     --dim:#6B7A85; --fg:#E8EEF2;
   }
   *{box-sizing:border-box}
@@ -26,12 +27,26 @@
   .led.on{background:var(--phos);box-shadow:0 0 8px var(--phos)}
   .led.done{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 
+  .wall{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+    padding:10px 14px;border-bottom:1px solid var(--line)}
+  body.running .wall{display:none}
+  .wall b{font-size:17px;font-weight:500;font-variant-numeric:tabular-nums;
+    letter-spacing:.01em}
+  .wall b em{font-style:normal;opacity:.5;font-size:.72em}
+  .wall span{font-size:9px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--dim);text-align:right;line-height:1.5}
+
   .readout{padding:30px 14px 20px;text-align:center}
   .digits{font-size:clamp(38px,12vw,54px);font-weight:500;line-height:1;
     font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;
     letter-spacing:-.01em;color:var(--phos);white-space:nowrap}
   .digits .tenth{color:var(--fg);opacity:.55;font-size:.6em}
-  .digits.expired{color:var(--amber)}
+  /* parked reads slate, live reads phosphor, expired reads amber.
+     The colour is the state indicator, so the number can be read at a
+     glance without checking the LED or the buttons. */
+  body:not(.running) .digits{color:var(--idle)}
+  body:not(.running) .bar span{background:var(--idle)}
+  .digits.expired,body:not(.running) .digits.expired{color:var(--amber)}
   .sub{margin-top:10px;font-size:10px;letter-spacing:.12em;
     text-transform:uppercase;color:var(--dim);min-height:12px}
   .bar{height:2px;background:var(--line);margin:20px 0 0;position:relative}
@@ -68,6 +83,9 @@
   input:focus{outline:1px solid var(--phos)}
   .note{padding:0 14px 12px;font-size:9px;line-height:1.6;color:var(--dim);
     letter-spacing:.04em}
+  .credit{padding-top:0;opacity:.7}
+  .credit a{color:var(--dim);text-decoration:underline;text-underline-offset:2px}
+  .credit a:hover{color:var(--phos)}
 
   .opt{display:flex;align-items:center;gap:9px;padding:11px 14px;
     border-top:1px solid var(--line);font-size:10px;letter-spacing:.12em;
@@ -107,6 +125,11 @@
 
 <div class="unit">
   <div class="head"><span>Precision Countdown</span><span class="led" id="led"></span></div>
+
+  <div class="wall" id="wall">
+    <b id="wallTime">--:--:--<em>.-</em></b>
+    <span id="wallMeta">syncing</span>
+  </div>
 
   <div class="readout">
     <div class="digits" id="digits">--:--<span class="tenth">.-</span></div>
@@ -154,6 +177,9 @@
   </label>
 
   <p class="note" id="srcNote">Clock source: local device</p>
+  <p class="note credit">Time sources:
+    <a href="https://time.now" target="_blank" rel="noopener">World Time API by Time.Now</a>,
+    gettimeapi.dev, timeapi.io, worldtimeapi.org</p>
 </div>
 
 <div id="flash" aria-hidden="true"></div>
@@ -185,13 +211,34 @@
    the OS clock is stepped mid-countdown.
    ================================================================= */
 
+/* Purpose-built time services only. cdn-cgi/trace is deliberately absent:
+   it is Cloudflare's connection-debug endpoint, not a time service. Its
+   ts field is whatever the edge happened to stamp while assembling a
+   diagnostic page, it carries no accuracy commitment, no stability
+   guarantee, and no notice if the field is renamed or dropped. Precise
+   digits from an endpoint that never promised to be a clock are worse
+   than fewer digits from one that did — the error becomes unbounded and
+   silent. Cloudflare does run a real time service at time.cloudflare.com,
+   but that speaks NTP over UDP and no page can reach it. */
+
 const SOURCES = [
-  { name: 'Cloudflare trace',
-    url: 'https://cloudflare.com/cdn-cgi/trace',
+  { name: 'time.now',
+    url: 'https://time.now/developer/api/timezone/Etc/UTC',
     async parse(res) {
-      const m = (await res.text()).match(/^ts=([\d.]+)/m);
-      if (!m) throw new Error('no ts');
-      return parseFloat(m[1]) * 1000;          // microsecond precision
+      const j = await res.json();
+      // utc_datetime carries microseconds; Date.parse truncates to ms,
+      // which is well below the path-asymmetry noise floor anyway
+      const t = Date.parse(j.utc_datetime || j.datetime);
+      if (!Number.isFinite(t)) throw new Error('bad datetime');
+      return t;
+    } },
+  { name: 'gettimeapi.dev',
+    url: 'https://gettimeapi.dev/v1/time?timezone=UTC',
+    async parse(res) {
+      const j = await res.json();                 // time carries microseconds
+      const t = Date.parse(`${j.date}T${j.time}Z`);
+      if (!Number.isFinite(t)) throw new Error('bad time');
+      return t;
     } },
   { name: 'timeapi.io',
     url: 'https://timeapi.io/api/Time/current/zone?timeZone=UTC',
@@ -207,10 +254,13 @@ const SOURCES = [
       const j = await res.json();
       return Date.parse(j.utc_datetime);        // microsecond precision
     } },
-  { name: 'HTTP Date header',
-    url: 'https://cloudflare.com/cdn-cgi/trace',
+  { name: 'time.now Date header',
+    url: 'https://time.now/developer/api/timezone/Etc/UTC',
+    fallback: true,                              // never ranked, always last
     async parse(res) {
-      const d = res.headers.get('date');        // 1 s granularity only
+      // survives a body-schema change at the same service. 1 s granularity,
+      // so it is a floor to stay above, not a source to prefer.
+      const d = res.headers.get('date');
       if (!d) throw new Error('Date header not exposed by CORS');
       return Date.parse(d) + 500;               // centre the 1 s bucket
     } }
@@ -219,50 +269,147 @@ const SOURCES = [
 class ClockSync {
   base = Date.now() - performance.now();   // epoch at perf origin
   uncertainty = Infinity;
+  rtt = null;
+  dispersion = null;                       // spread across accepted samples
   source = 'local device';
   granularity = 0;
   skewPpm = null;
+  timing = 'wall';                         // 'resource' once TAO is available
+  probeTable = [];                         // measured RTT per source, ranked
   #history = [];
+  #lastAt = 0;
   #onChange = null;
+  #ranked = null;
+  #sinceProbe = 0;
 
   onChange(fn) { this.#onChange = fn; return this; }
 
-  now() { return this.base + performance.now(); }
-
-  async #sample(src) {
-    const t0 = performance.now();
-    const res = await fetch(src.url, { cache: 'no-store', mode: 'cors' });
-    const t1 = performance.now();
-    const serverMs = await src.parse(res);
-    // Cristian: assume the reply took half the round trip to reach us
-    return { base: serverMs + (t1 - t0) / 2 - t1, rtt: t1 - t0 };
+  // a dead or slow source must not stall the chain behind it
+  async #fetch(url, ms = 2500) {
+    const ac = new AbortController();
+    const kill = setTimeout(() => ac.abort(), ms);
+    try { return await fetch(url, { cache: 'no-store', mode: 'cors', signal: ac.signal }); }
+    finally { clearTimeout(kill); }
   }
 
-  async sync({ samples = 5 } = {}) {
+  /* Skew compensation. A consumer crystal drifts 10-50 ppm, so between
+     two syncs the offset established at the last handshake is already
+     going stale. Once a rate estimate exists it is projected forward,
+     which is the difference between holding ~1 ms and ~15 ms over a
+     five-minute gap. */
+  now() {
+    const p = performance.now();
+    const corr = this.skewPpm ? (p - this.#lastAt) * this.skewPpm / 1e6 : 0;
+    return this.base + p + corr;
+  }
+
+  async #sample(src) {
+    // unique URL: defeats any cache and gives this request its own
+    // resource-timing entry to look up afterwards
+    const url = src.url + (src.url.includes('?') ? '&' : '?') +
+                '_=' + Math.random().toString(36).slice(2);
+    const t0 = performance.now();
+    const res = await this.#fetch(url);
+    const t1 = performance.now();
+    const serverMs = await src.parse(res);
+
+    /* Prefer Resource Timing over the fetch wrapper. t0/t1 measured in
+       JS include promise scheduling, CORS preflight bookkeeping and the
+       body read — all of which inflate the apparent RTT and therefore
+       the rtt/2 correction. requestStart -> responseStart is the wire
+       interval to the first response byte, which is the moment closest
+       to when the server stamped the time. Needs Timing-Allow-Origin
+       on the response; falls back silently when the fields are zeroed. */
+    let a = t0, b = t1, timing = 'wall';
+    const e = performance.getEntriesByName(url).pop();
+    if (e && e.requestStart > 0 && e.responseStart > e.requestStart) {
+      a = e.requestStart; b = e.responseStart; timing = 'resource';
+    }
+    return { base: serverMs + (b - a) / 2 - b, rtt: b - a, timing };
+  }
+
+  /* Connection warm-up. The first request to a host pays DNS, TCP and
+     TLS before a single byte of the response exists — one to three extra
+     round trips folded into the measurement. Discarding one throwaway
+     request leaves the socket open, so the samples that follow measure
+     only the request/response leg. This is the single largest RTT
+     reduction available from the browser, typically halving it.
+     It doubles as a reachability probe: a source that fails here is
+     skipped without burning six sample attempts on it. */
+  async #warm(src) {
+    try { await this.#fetch(src.url + (src.url.includes('?') ? '&' : '?') + '_warm=1', 2500);
+          return true; }
+    catch { return false; }
+  }
+
+  /* Rank the providers by MEASURED round trip, not by a hardcoded guess.
+     Hop count is what governs the path-asymmetry error that dominates
+     the whole estimate, and no static ordering can know which provider
+     sits nearest to this particular client — an anycast edge that is two
+     hops away in Frankfurt may be twelve away in Taipei. Each source is
+     warmed, then sampled once, sequentially: probing in parallel would
+     have the requests contend for the same uplink and corrupt exactly
+     the number being measured. */
+  async #rank() {
+    const scored = [];
     for (const src of SOURCES) {
+      if (src.fallback) continue;                  // last resort, never ranked
+      if (!await this.#warm(src)) continue;        // unreachable, drop it
+      try {
+        const s = await this.#sample(src);
+        scored.push({ src, rtt: s.rtt });
+      } catch { /* parse failure: not a usable source */ }
+    }
+    scored.sort((a, b) => a.rtt - b.rtt);
+    this.probeTable = scored.map(s => `${s.src.name} ${s.rtt.toFixed(0)}`);
+    this.#ranked = [...scored.map(s => s.src), ...SOURCES.filter(s => s.fallback)];
+    this.#sinceProbe = 0;
+    return this.#ranked;
+  }
+
+  async sync({ samples = 6, reprobe = false } = {}) {
+    // re-rank on first use, on request, or when the ranking has aged out.
+    // Routing changes; the nearest edge ten minutes ago may not be now.
+    if (!this.#ranked || reprobe || this.#sinceProbe >= 10) await this.#rank();
+    this.#sinceProbe++;
+
+    for (const src of (this.#ranked?.length ? this.#ranked : SOURCES)) {
+      if (!await this.#warm(src)) continue;
       const good = [];
       for (let i = 0; i < samples; i++) {
         try { good.push(await this.#sample(src)); }
         catch { break; }
-        await new Promise(r => setTimeout(r, 120));  // avoid burst throttling
+        await new Promise(r => setTimeout(r, 110));   // avoid burst throttling
       }
       if (!good.length) continue;
 
-      // minimum-delay filter: fastest round trip is the least distorted
+      // minimum-delay filter: the fastest round trip has the least room
+      // for the path asymmetry that Cristian's rtt/2 term cannot see
       const best = good.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+
+      // agreement across samples is the honest error bar. A tight cluster
+      // over a fast path means the estimate is real; a wide spread means
+      // the half-RTT figure is flattering itself.
+      const bases = good.map(s => s.base).sort((x, y) => x - y);
+      const spread = bases.at(-1) - bases[0];
+
       const prev = this.#history.at(-1);
+      const at = performance.now();
 
       this.base = best.base;
+      this.rtt = best.rtt;
       this.uncertainty = best.rtt / 2;
+      this.dispersion = spread;
       this.source = src.name;
-      this.granularity = src.name === 'HTTP Date header' ? 1000 : 1;
+      this.timing = best.timing;
+      this.granularity = src.fallback ? 1000 : 1;   // Date header buckets to 1 s
 
-      // two syncs apart in time expose the local crystal's rate error
-      if (prev && performance.now() - prev.at > 60000) {
-        const elapsed = performance.now() - prev.at;
-        this.skewPpm = ((this.base - prev.base) / elapsed) * 1e6;
+      // two syncs far enough apart expose the local crystal's rate error
+      if (prev && at - prev.at > 60000) {
+        this.skewPpm = ((this.base - prev.base) / (at - prev.at)) * 1e6;
       }
-      this.#history.push({ base: this.base, at: performance.now() });
+      this.#history.push({ base: this.base, at });
+      this.#lastAt = at;
       this.#onChange?.(this);
       return this;
     }
@@ -570,6 +717,7 @@ const el = {
   dur:$('dur'), tgt:$('tgt'), tabDur:$('tabDur'), tabTgt:$('tabTgt'),
   setDur:$('setDur'), setTgt:$('setTgt'), note:$('srcNote'),
   flash:$('flash'), flashOn:$('flashOn'), beepOn:$('beepOn'),
+  wallTime:$('wallTime'), wallMeta:$('wallMeta'),
   cue:document.querySelector('#cue b')
 };
 
@@ -587,7 +735,13 @@ const clock = new ClockSync().onChange(c => {
   el.unc.textContent = c.uncertainty === Infinity ? '—' : c.uncertainty.toFixed(0);
   el.skew.textContent = c.skewPpm === null ? '—' : c.skewPpm.toFixed(1);
   el.note.textContent = `Clock source: ${c.source}` +
+    (c.rtt ? ` · rtt ${c.rtt.toFixed(0)} ms` : '') +
+    (c.timing === 'resource' ? ' · wire-timed' : ' · wall-timed') +
+    (c.dispersion !== null ? ` · spread ${c.dispersion.toFixed(0)} ms` : '') +
     (c.granularity === 1000 ? ' — 1 s granularity, offset is approximate' : '');
+  el.note.title = c.probeTable.length
+    ? 'Measured RTT, nearest first: ' + c.probeTable.join(' · ')
+    : '';
   if (mode === 'target' && targetEpoch !== null) apply();   // deadline follows the sync
 });
 
@@ -617,6 +771,7 @@ function setState(state) {
   el.start.textContent = state === 'paused' ? 'Resume' : 'Start';
   el.dur.disabled = state === 'running';
   el.tabDur.disabled = el.tabTgt.disabled = state === 'running';
+  document.body.classList.toggle('running', state === 'running');
 }
 
 function apply() {
@@ -658,16 +813,9 @@ function describeTarget(extra = '') {
    the timer is armed, so an idle readout that was computed when the
    target was typed goes stale on its own. This recomputes from
    clock.now() four times a second while parked. */
-let preview = null;
-function startPreview() {
-  stopPreview();
-  preview = setInterval(() => {
-    if (mode !== 'target' || timer.running || targetEpoch === null) return;
-    const remaining = Math.max(0, targetEpoch - clock.now());
-    timer.load(remaining, timer.span);
-  }, 250);
-}
-function stopPreview() { clearInterval(preview); preview = null; }
+let preview = false;
+function startPreview() { preview = true; }
+function stopPreview()  { preview = false; }
 
 /* Arming a target countdown: resync first, then derive the interval
    from the fresh clock. The sync itself takes ~1 s, which costs
@@ -720,7 +868,7 @@ el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
 el.sync.onclick   = async () => {
   el.sync.textContent = '···'; el.sync.disabled = true;
-  await clock.sync();
+  await clock.sync({ reprobe: true });   // manual sync re-ranks the providers
   el.sync.textContent = 'Sync'; el.sync.disabled = false;
 };
 
@@ -731,14 +879,52 @@ const seedMs = Math.ceil((Date.now() + 30000) / 60000) * 60000;
 const seed = new Date(seedMs - new Date(seedMs).getTimezoneOffset() * 60000);
 el.tgt.value = seed.toISOString().slice(0, 19);
 
-/* rAF probe, independent of the countdown loop */
-let frames = 0, mark = performance.now();
-(function probe(){
+/* Wall clock readout. Runs off the synced clock, not Date.now(), so the
+   time on screen is the corrected one — and it is the same value the
+   deadline is computed against, which makes the offset auditable rather
+   than a number you have to trust. */
+const TZ = (() => {
+  const m = -new Date().getTimezoneOffset();
+  const s = m < 0 ? '-' : '+';
+  return `UTC${s}${String(Math.floor(Math.abs(m) / 60)).padStart(2,'0')}:${String(Math.abs(m) % 60).padStart(2,'0')}`;
+})();
+
+function wallText(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}` +
+         `<em>.${Math.floor(d.getMilliseconds() / 100)}</em>`;
+}
+
+/* Single rAF loop: frame-rate probe, wall clock, and the idle preview of
+   the target interval. One loop rather than three keeps every readout on
+   the same frame, so they can never disagree by a tick. */
+let frames = 0, mark = performance.now(), lastWall = -1;
+
+(function probe() {
   frames++;
-  const now = performance.now();
-  if (now - mark >= 1000) {
-    el.fps.textContent = Math.round(frames * 1000 / (now - mark));
-    frames = 0; mark = now;
+  const p = performance.now();
+
+  if (p - mark >= 1000) {
+    el.fps.textContent = Math.round(frames * 1000 / (p - mark));
+    frames = 0; mark = p;
+  }
+
+  if (!timer.running) {
+    const t = clock.now();
+    const step = Math.floor(t / 100);
+    if (step !== lastWall) {                     // one write per tenth
+      lastWall = step;
+      el.wallTime.innerHTML = wallText(t);
+      const off = clock.base - (Date.now() - performance.now());
+      el.wallMeta.innerHTML = clock.uncertainty === Infinity
+        ? `${TZ} · device clock, unsynced`
+        : `${TZ} · device ${off >= 0 ? '+' : ''}${off.toFixed(0)} ms · ±${clock.uncertainty.toFixed(0)} ms`;
+
+      if (preview && mode === 'target' && targetEpoch !== null) {
+        timer.load(Math.max(0, targetEpoch - t), timer.span);
+      }
+    }
   }
   requestAnimationFrame(probe);
 })();
