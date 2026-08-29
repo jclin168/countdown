@@ -148,6 +148,11 @@
     Flash alert at zero
   </label>
 
+  <label class="opt" for="beepOn">
+    <input type="checkbox" id="beepOn" checked>
+    Beep on final five
+  </label>
+
   <p class="note" id="srcNote">Clock source: local device</p>
 </div>
 
@@ -472,6 +477,73 @@ class BigCue {
   }
 }
 
+/* =================================================================
+   5. Beeper — five short pips, one long tone at zero
+   -----------------------------------------------------------------
+   Not fired from the rAF tick. The audio hardware runs on its own
+   clock and rAF is subject to compositor jitter, so a pip triggered
+   from a frame callback lands wherever that frame lands — tens of
+   milliseconds off, and audibly ragged against a visual cue.
+
+   Instead the whole sequence is scheduled ahead against
+   AudioContext.currentTime, which is sample-accurate. Arming maps
+   the deadline once:
+
+       audioZero = ctx.currentTime + msToZero / 1000
+
+   and every pip is placed at audioZero - k. A resync that moves the
+   deadline calls arm() again, which cancels the pending oscillators
+   and re-places them. Envelopes ramp over 5 ms rather than starting
+   at full gain, otherwise the discontinuity clicks.
+   ================================================================= */
+
+class Beeper {
+  #ctx = null; #pending = []; #enabled = () => true;
+
+  constructor(isEnabled) { if (isEnabled) this.#enabled = isEnabled; }
+
+  get ctx() {
+    if (!this.#ctx) this.#ctx = new (window.AudioContext || window.webkitAudioContext)();
+    return this.#ctx;
+  }
+
+  // must run inside a user gesture, before any await
+  unlock() { if (this.ctx.state === 'suspended') this.ctx.resume(); }
+
+  cancel() {
+    for (const osc of this.#pending) { try { osc.stop(); } catch {} }
+    this.#pending = [];
+  }
+
+  #tone(at, freq, dur, peak) {
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, at);
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(peak, at + 0.005);   // no click on attack
+    gain.gain.setValueAtTime(peak, at + dur - 0.03);
+    gain.gain.linearRampToValueAtTime(0, at + dur);        // no click on release
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(at);
+    osc.stop(at + dur + 0.02);
+    this.#pending.push(osc);
+  }
+
+  arm(msToZero) {
+    this.cancel();
+    if (!this.#enabled() || !(msToZero > 0)) return;
+    const ctx = this.ctx;
+    const zero = ctx.currentTime + msToZero / 1000;
+    for (let k = 5; k >= 1; k--) {
+      const at = zero - k;
+      if (at > ctx.currentTime + 0.02) this.#tone(at, 880, 0.09, 0.22);  // short pip
+    }
+    this.#tone(zero, 440, 0.80, 0.30);                                    // long tone
+  }
+}
+
 /* ================= formatting ================= */
 
 function format(step) {
@@ -497,11 +569,13 @@ const el = {
   start:$('startBtn'), pause:$('pauseBtn'), reset:$('resetBtn'), sync:$('syncBtn'),
   dur:$('dur'), tgt:$('tgt'), tabDur:$('tabDur'), tabTgt:$('tabTgt'),
   setDur:$('setDur'), setTgt:$('setTgt'), note:$('srcNote'),
-  flash:$('flash'), flashOn:$('flashOn'), cue:document.querySelector('#cue b')
+  flash:$('flash'), flashOn:$('flashOn'), beepOn:$('beepOn'),
+  cue:document.querySelector('#cue b')
 };
 
 const flash = new FlashAlert(el.flash);
 const cue = new BigCue(el.cue);
+const beeper = new Beeper(() => el.beepOn.checked);
 
 let mode = 'duration';
 let targetEpoch = null;
@@ -541,20 +615,34 @@ function setState(state) {
   el.start.disabled = state === 'running' || state === 'done';
   el.pause.disabled = state !== 'running';
   el.start.textContent = state === 'paused' ? 'Resume' : 'Start';
+  el.dur.disabled = state === 'running';
+  el.tabDur.disabled = el.tabTgt.disabled = state === 'running';
 }
 
 function apply() {
-  stopPreview();
   if (mode === 'duration') {
+    if (timer.running) return;                 // a resync cannot disturb a live run
+    stopPreview();
     const ms = Math.round((parseFloat(el.dur.value) || 1) * 1000);
     timer.load(ms);
     el.sub.textContent = '';
   } else {
     if (!el.tgt.value) { el.sub.textContent = 'Pick a target time'; return; }
     targetEpoch = new Date(el.tgt.value).getTime();      // local wall time
+    if (timer.running) {
+      // resync moved the clock: slide the deadline, re-place the pips,
+      // and leave the run state alone
+      const endPerf = targetEpoch - clock.base;
+      timer.retarget(endPerf);
+      beeper.arm(endPerf - performance.now());
+      describeTarget(' · resynced');
+      setState('running');
+      return;
+    }
+    stopPreview();
     const remaining = Math.max(0, targetEpoch - clock.now());
-    if (timer.running) timer.retarget(targetEpoch - clock.base);
-    else { timer.load(remaining, Math.max(remaining, 1)); startPreview(); }
+    timer.load(remaining, Math.max(remaining, 1));
+    startPreview();
     describeTarget();
   }
   setState('idle');
@@ -604,6 +692,7 @@ async function armTarget() {
   timer.span = remaining;
   describeTarget(` · armed ${(remaining / 1000).toFixed(1)} s out`);
   timer.startAt(endPerf);
+  beeper.arm(endPerf - performance.now());
 }
 
 function setMode(next) {
@@ -619,11 +708,14 @@ el.tabDur.onclick = () => setMode('duration');
 el.tabTgt.onclick = () => setMode('target');
 el.start.onclick  = () => {
   flash.stop();
-  if (mode === 'target') armTarget();    // resync, then arm on the fresh interval
-  else timer.start();
+  beeper.unlock();                       // must run in the gesture, before any await
+  if (mode === 'target') { armTarget(); return; }
+  timer.start();
+  beeper.arm(timer.remaining);
 };
-el.pause.onclick  = () => { cue.hide(); timer.pause(); if (mode === 'target') startPreview(); };
-el.reset.onclick  = () => { flash.stop(); cue.hide(); timer.pause(); apply(); };
+el.pause.onclick  = () => { cue.hide(); beeper.cancel(); timer.pause(); if (mode === 'target') startPreview(); };
+el.reset.onclick  = () => { flash.stop(); cue.hide(); beeper.cancel(); timer.pause(); apply(); };
+el.beepOn.onchange = () => timer.running ? beeper.arm(timer.remaining) : beeper.cancel();
 el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
 el.sync.onclick   = async () => {
