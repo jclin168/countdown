@@ -294,11 +294,20 @@ class HiResCountdown {
   load(ms, span) { this.span = span ?? ms; this.#remaining = Math.max(0, ms);
     this.#running = false; this.#stop(); this.#lastStep = -1; this.#emit(this.#remaining); }
 
-  start() {
-    if (this.#running || this.#remaining <= 0) return;
+  start() { this.startAt(performance.now() + this.#remaining); }
+
+  // arm against a deadline already expressed in the perf domain.
+  // Target mode uses this so the countdown never derives from a
+  // remaining value that was computed at some earlier moment.
+  startAt(endPerf) {
+    const remaining = Math.max(0, endPerf - performance.now());
+    if (this.#running || remaining <= 0) return;
+    this.#stop();
     this.#running = true;
-    this.#end = performance.now() + this.#remaining;
-    this.#safety = setTimeout(() => this.#frame(), this.#remaining + 20);
+    this.#end = endPerf;
+    this.#remaining = remaining;
+    this.#lastStep = -1;
+    this.#safety = setTimeout(() => this.#frame(), remaining + 20);
     this.onState?.('running');
     this.#frame();
   }
@@ -535,6 +544,7 @@ function setState(state) {
 }
 
 function apply() {
+  stopPreview();
   if (mode === 'duration') {
     const ms = Math.round((parseFloat(el.dur.value) || 1) * 1000);
     timer.load(ms);
@@ -542,13 +552,58 @@ function apply() {
   } else {
     if (!el.tgt.value) { el.sub.textContent = 'Pick a target time'; return; }
     targetEpoch = new Date(el.tgt.value).getTime();      // local wall time
-    const remaining = targetEpoch - clock.now();
+    const remaining = Math.max(0, targetEpoch - clock.now());
     if (timer.running) timer.retarget(targetEpoch - clock.base);
-    else timer.load(remaining, Math.max(remaining, 1));
-    el.sub.textContent = new Date(targetEpoch).toLocaleString(undefined,
-      { dateStyle: 'medium', timeStyle: 'medium' }) + ` · ±${clock.uncertainty === Infinity ? '?' : clock.uncertainty.toFixed(0)} ms`;
+    else { timer.load(remaining, Math.max(remaining, 1)); startPreview(); }
+    describeTarget();
   }
   setState('idle');
+}
+
+function describeTarget(extra = '') {
+  const unc = clock.uncertainty === Infinity ? '?' : clock.uncertainty.toFixed(0);
+  el.sub.textContent = new Date(targetEpoch).toLocaleString(undefined,
+    { dateStyle:'medium', timeStyle:'medium' }) + ` · ±${unc} ms` + extra;
+}
+
+/* Idle preview. A wall-clock deadline keeps approaching whether or not
+   the timer is armed, so an idle readout that was computed when the
+   target was typed goes stale on its own. This recomputes from
+   clock.now() four times a second while parked. */
+let preview = null;
+function startPreview() {
+  stopPreview();
+  preview = setInterval(() => {
+    if (mode !== 'target' || timer.running || targetEpoch === null) return;
+    const remaining = Math.max(0, targetEpoch - clock.now());
+    timer.load(remaining, timer.span);
+  }, 250);
+}
+function stopPreview() { clearInterval(preview); preview = null; }
+
+/* Arming a target countdown: resync first, then derive the interval
+   from the fresh clock. The sync itself takes ~1 s, which costs
+   nothing here — the deadline is an absolute epoch value, so however
+   long the handshake takes, endPerf still lands on the same instant. */
+async function armTarget() {
+  if (!el.tgt.value) { el.sub.textContent = 'Pick a target time'; return; }
+  el.start.disabled = true;
+  el.start.textContent = 'Syncing';
+  await clock.sync({ samples: 4 });
+
+  targetEpoch = new Date(el.tgt.value).getTime();
+  const endPerf = targetEpoch - clock.base;             // epoch -> perf domain
+  const remaining = endPerf - performance.now();
+
+  if (remaining <= 0) {
+    describeTarget(' · already passed');
+    setState('idle');
+    return;
+  }
+  stopPreview();
+  timer.span = remaining;
+  describeTarget(` · armed ${(remaining / 1000).toFixed(1)} s out`);
+  timer.startAt(endPerf);
 }
 
 function setMode(next) {
@@ -562,8 +617,12 @@ function setMode(next) {
 
 el.tabDur.onclick = () => setMode('duration');
 el.tabTgt.onclick = () => setMode('target');
-el.start.onclick  = () => { flash.stop(); timer.start(); };
-el.pause.onclick  = () => { cue.hide(); timer.pause(); };
+el.start.onclick  = () => {
+  flash.stop();
+  if (mode === 'target') armTarget();    // resync, then arm on the fresh interval
+  else timer.start();
+};
+el.pause.onclick  = () => { cue.hide(); timer.pause(); if (mode === 'target') startPreview(); };
 el.reset.onclick  = () => { flash.stop(); cue.hide(); timer.pause(); apply(); };
 el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
