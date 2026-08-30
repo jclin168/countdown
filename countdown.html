@@ -26,6 +26,10 @@
   .led{width:7px;height:7px;border-radius:50%;background:var(--line);transition:background .15s}
   .led.on{background:var(--phos);box-shadow:0 0 8px var(--phos)}
   .led.done{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .head .right{display:flex;align-items:center;gap:9px}
+  .tag{font-size:9px;letter-spacing:.16em;color:#2E3A44;transition:color .2s}
+  .tag.on{color:var(--phos)}
+  .tag.na{color:#2E3A44;text-decoration:line-through}
 
   .wall{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
     padding:10px 14px;border-bottom:1px solid var(--line)}
@@ -124,7 +128,12 @@
 <body>
 
 <div class="unit">
-  <div class="head"><span>Precision Countdown</span><span class="led" id="led"></span></div>
+  <div class="head"><span>Precision Countdown</span>
+    <span class="right">
+      <span class="tag" id="awake">awake</span>
+      <span class="led" id="led"></span>
+    </span>
+  </div>
 
   <div class="wall" id="wall">
     <b id="wallTime">--:--:--<em>.-</em></b>
@@ -153,7 +162,7 @@
   </div>
 
   <div class="diag">
-    <div><b id="fps">—</b><i>rAF fps</i></div>
+    <div><b id="fps">—</b><i>ui fps</i></div>
     <div><b id="offset">—</b><i>offset ms</i></div>
     <div><b id="unc">—</b><i>± ms</i></div>
     <div><b id="skew">—</b><i>ppm</i></div>
@@ -174,6 +183,11 @@
   <label class="opt" for="beepOn">
     <input type="checkbox" id="beepOn" checked>
     Beep on final five
+  </label>
+
+  <label class="opt" for="wakeOn">
+    <input type="checkbox" id="wakeOn" checked>
+    Keep screen awake while running
   </label>
 
   <p class="note" id="srcNote">Clock source: local device</p>
@@ -691,6 +705,64 @@ class Beeper {
   }
 }
 
+/* =================================================================
+   6. ScreenLock — Screen Wake Lock API
+   -----------------------------------------------------------------
+   A phone dimming and sleeping mid-countdown is not a cosmetic
+   problem here. A sleeping screen means rAF is parked, the visual
+   cue never renders, and on some platforms the audio graph is
+   suspended too — the whole alert misses.
+
+   Three facts drive the design:
+
+   1. The request needs a visible document, and Safari needs a user
+      gesture. So acquire() is called straight from the Start click,
+      before any await, exactly like the AudioContext unlock.
+   2. The OS releases the lock whenever the tab is hidden, and does
+      NOT hand it back on return. A visibilitychange listener has to
+      re-take it, otherwise the lock silently dies the first time
+      the user switches apps.
+   3. It is not universally supported — iOS only from Safari 16.4.
+      Unsupported is reported in the header rather than pretended.
+   ================================================================= */
+
+class ScreenLock {
+  supported = 'wakeLock' in navigator;
+  #lock = null;
+  #want = false;
+  #onChange = null;
+
+  constructor(onChange) {
+    this.#onChange = onChange;
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.#take();     // re-take after backgrounding
+    });
+  }
+
+  get held() { return this.#lock !== null; }
+
+  async acquire() { this.#want = true; await this.#take(); }
+
+  async release() {
+    this.#want = false;
+    try { await this.#lock?.release(); } catch {}
+    this.#lock = null;
+    this.#onChange?.(this);
+  }
+
+  async #take() {
+    if (!this.supported || !this.#want || this.#lock || document.hidden) return;
+    try {
+      this.#lock = await navigator.wakeLock.request('screen');
+      this.#lock.addEventListener('release', () => {
+        this.#lock = null;                    // OS took it back
+        this.#onChange?.(this);
+      });
+    } catch { this.#lock = null; }            // denied, e.g. battery saver
+    this.#onChange?.(this);
+  }
+}
+
 /* ================= formatting ================= */
 
 function format(step) {
@@ -718,12 +790,20 @@ const el = {
   setDur:$('setDur'), setTgt:$('setTgt'), note:$('srcNote'),
   flash:$('flash'), flashOn:$('flashOn'), beepOn:$('beepOn'),
   wallTime:$('wallTime'), wallMeta:$('wallMeta'),
+  wakeOn:$('wakeOn'), awake:$('awake'),
   cue:document.querySelector('#cue b')
 };
 
 const flash = new FlashAlert(el.flash);
 const cue = new BigCue(el.cue);
 const beeper = new Beeper(() => el.beepOn.checked);
+const screenLock = new ScreenLock(s => {
+  el.awake.className = 'tag' + (!s.supported ? ' na' : s.held ? ' on' : '');
+  el.awake.title = !s.supported
+    ? 'Screen Wake Lock not supported by this browser'
+    : s.held ? 'Screen held awake' : 'Screen may sleep';
+});
+if (!screenLock.supported) el.awake.className = 'tag na';
 
 let mode = 'target';
 let targetEpoch = null;
@@ -760,6 +840,8 @@ const timer = new HiResCountdown({
     navigator.vibrate?.([120, 60, 120]);
     cue.show('NOW', { word: true, holdMs: FLASH.DURATION });
     if (el.flashOn.checked) flash.fire();
+    // hold the screen through the alert window, then let it sleep
+    setTimeout(() => screenLock.release(), FLASH.DURATION);
   }
 });
 
@@ -772,6 +854,7 @@ function setState(state) {
   el.dur.disabled = state === 'running';
   el.tabDur.disabled = el.tabTgt.disabled = state === 'running';
   document.body.classList.toggle('running', state === 'running');
+  useLoop();
 }
 
 function apply() {
@@ -857,13 +940,15 @@ el.tabTgt.onclick = () => setMode('target');
 el.start.onclick  = () => {
   flash.stop();
   beeper.unlock();                       // must run in the gesture, before any await
+  if (el.wakeOn.checked) screenLock.acquire();   // same reason: gesture, no await
   if (mode === 'target') { armTarget(); return; }
   timer.start();
   beeper.arm(timer.remaining);
 };
-el.pause.onclick  = () => { cue.hide(); beeper.cancel(); timer.pause(); if (mode === 'target') startPreview(); };
-el.reset.onclick  = () => { flash.stop(); cue.hide(); beeper.cancel(); timer.pause(); apply(); };
+el.pause.onclick  = () => { cue.hide(); beeper.cancel(); screenLock.release(); timer.pause(); if (mode === 'target') startPreview(); };
+el.reset.onclick  = () => { flash.stop(); cue.hide(); beeper.cancel(); screenLock.release(); timer.pause(); apply(); };
 el.beepOn.onchange = () => timer.running ? beeper.arm(timer.remaining) : beeper.cancel();
+el.wakeOn.onchange = () => el.wakeOn.checked ? screenLock.acquire() : screenLock.release();
 el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
 el.sync.onclick   = async () => {
@@ -896,38 +981,74 @@ function wallText(ms) {
          `<em>.${Math.floor(d.getMilliseconds() / 100)}</em>`;
 }
 
-/* Single rAF loop: frame-rate probe, wall clock, and the idle preview of
-   the target interval. One loop rather than three keeps every readout on
-   the same frame, so they can never disagree by a tick. */
-let frames = 0, mark = performance.now(), lastWall = -1;
+/* Two loops, one at a time.
+   -----------------------------------------------------------------
+   Running: rAF, full refresh rate. The tenths digit changes 10x/s and
+   the cue has to land on the right frame, so nothing is throttled.
 
-(function probe() {
+   Parked: setTimeout at 15 Hz. Nothing on screen moves faster than the
+   half-second text update, so a 120 Hz rAF loop would burn eight frames
+   for every one that changes a pixel. setTimeout rather than a gated
+   rAF because a gated rAF still wakes the compositor every frame — the
+   browser can only skip the work if we never ask for the frame.
+
+   Text updates run at 2 Hz, gated on the 500 ms bucket. Sampling just
+   after the boundary keeps the tenths digit near .0 and .5 — within one
+   67 ms tick of it — so a slow refresh reads as deliberate rather than
+   as a digit wandering at random. */
+
+const IDLE_HZ = 15;              // UI loop rate while parked
+const TEXT_MS = 500;             // wall clock + preview refresh, 2 Hz
+
+let frames = 0, mark = performance.now(), lastBucket = -1;
+let idleTimer = null, rafId = null;
+
+function meter() {
   frames++;
   const p = performance.now();
-
   if (p - mark >= 1000) {
     el.fps.textContent = Math.round(frames * 1000 / (p - mark));
     frames = 0; mark = p;
   }
+}
 
-  if (!timer.running) {
-    const t = clock.now();
-    const step = Math.floor(t / 100);
-    if (step !== lastWall) {                     // one write per tenth
-      lastWall = step;
-      el.wallTime.innerHTML = wallText(t);
-      const off = clock.base - (Date.now() - performance.now());
-      el.wallMeta.innerHTML = clock.uncertainty === Infinity
-        ? `${TZ} · device clock, unsynced`
-        : `${TZ} · device ${off >= 0 ? '+' : ''}${off.toFixed(0)} ms · ±${clock.uncertainty.toFixed(0)} ms`;
+function paintIdle() {
+  const t = clock.now();
+  const bucket = Math.floor(t / TEXT_MS);
+  if (bucket === lastBucket) return;
+  lastBucket = bucket;
 
-      if (preview && mode === 'target' && targetEpoch !== null) {
-        timer.load(Math.max(0, targetEpoch - t), timer.span);
-      }
-    }
+  el.wallTime.innerHTML = wallText(t);
+  const off = clock.base - (Date.now() - performance.now());
+  el.wallMeta.innerHTML = clock.uncertainty === Infinity
+    ? `${TZ} · device clock, unsynced`
+    : `${TZ} · device ${off >= 0 ? '+' : ''}${off.toFixed(0)} ms · ±${clock.uncertainty.toFixed(0)} ms`;
+
+  if (preview && mode === 'target' && targetEpoch !== null) {
+    timer.load(Math.max(0, targetEpoch - t), timer.span);
   }
-  requestAnimationFrame(probe);
-})();
+}
+
+function idleLoop() {
+  meter();
+  paintIdle();
+  idleTimer = setTimeout(idleLoop, 1000 / IDLE_HZ);
+}
+
+function runLoop() {
+  if (!timer.running) { rafId = null; return; }
+  meter();
+  rafId = requestAnimationFrame(runLoop);
+}
+
+// called on every state change: exactly one loop is ever alive
+function useLoop() {
+  clearTimeout(idleTimer); idleTimer = null;
+  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+  frames = 0; mark = performance.now(); lastBucket = -1;
+  if (timer.running) rafId = requestAnimationFrame(runLoop);
+  else idleTimer = setTimeout(idleLoop, 0);
+}
 
 setMode('target');                              // opens on the wall-clock deadline
 clock.sync();                                   // sync on load
