@@ -8,6 +8,7 @@
   :root{
     --bg:#0E1216; --panel:#161C22; --line:#243039;
     --phos:#4FD9E8; --amber:#E8B24F; --red:#E86A5A;
+    --green:#5FD08A; --pink:#E88AB8;
     --idle:#7A8A95;
     --dim:#6B7A85; --fg:#E8EEF2;
   }
@@ -33,7 +34,7 @@
 
   .wall{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
     padding:10px 14px;border-bottom:1px solid var(--line)}
-  body.running .wall{display:none}
+  body.running .wall b{color:var(--phos)}
   .wall b{font-size:17px;font-weight:500;font-variant-numeric:tabular-nums;
     letter-spacing:.01em}
   .wall b em{font-style:normal;opacity:.5;font-size:.72em}
@@ -41,7 +42,7 @@
     color:var(--dim);text-align:right;line-height:1.5}
 
   .readout{padding:30px 14px 20px;text-align:center}
-  .digits{font-size:clamp(38px,12vw,54px);font-weight:500;line-height:1;
+  .digits{font-size:clamp(30px,10vw,46px);font-weight:500;line-height:1;
     font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;
     letter-spacing:-.01em;color:var(--phos);white-space:nowrap}
   .digits .tenth{color:var(--fg);opacity:.55;font-size:.6em}
@@ -54,7 +55,8 @@
   .sub{margin-top:10px;font-size:10px;letter-spacing:.12em;
     text-transform:uppercase;color:var(--dim);min-height:12px}
   .bar{height:2px;background:var(--line);margin:20px 0 0;position:relative}
-  .bar span{position:absolute;inset:0 auto 0 0;background:var(--phos);width:100%}
+  .bar span{position:absolute;inset:0 auto 0 0;background:var(--phos);width:100%;
+    transform-origin:left;will-change:transform}
 
   .tabs{display:flex;gap:1px;background:var(--line);border-top:1px solid var(--line)}
   .tabs button{flex:1;background:var(--panel);color:var(--dim)}
@@ -66,7 +68,14 @@
   .diag b{display:block;font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
   .diag i{font-style:normal;font-size:8px;letter-spacing:.1em;
     text-transform:uppercase;color:var(--dim)}
-  .diag b.warn{color:var(--amber)} .diag b.bad{color:var(--red)}
+
+  /* Graded quality scale, shared by the diagnostics cells, the wall clock
+     meta line and the source line. One vocabulary everywhere, so a colour
+     means the same thing wherever it appears. */
+  .q0,.diag b.q0{color:var(--green)}   /* offset < 100 ms  */
+  .q1,.diag b.q1{color:var(--amber)}   /* offset < 500 ms  */
+  .q2,.diag b.q2{color:var(--pink)}    /* offset < 1000 ms */
+  .q3,.diag b.q3{color:var(--red)}     /* offset >= 1 s, or unsynced */
 
   .controls{display:flex;gap:1px;background:var(--line);border-top:1px solid var(--line)}
   button{flex:1;appearance:none;border:0;background:var(--panel);color:var(--fg);
@@ -84,10 +93,16 @@
   input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);
     color:var(--fg);font:inherit;font-size:13px;padding:6px 8px;border-radius:3px}
   input[type=number]{text-align:right;flex:0 0 90px}
+  input[type=time]{text-align:right;flex:0 0 120px}
   input:focus{outline:1px solid var(--phos)}
   .note{padding:0 14px 12px;font-size:9px;line-height:1.6;color:var(--dim);
     letter-spacing:.04em}
   .credit{padding-top:0;opacity:.7}
+  .pulse{display:inline-block;width:5px;height:5px;border-radius:50%;
+    background:var(--amber);margin-right:5px;vertical-align:middle;
+    animation:blink 1s steps(2,end) infinite}
+  @keyframes blink{50%{opacity:.15}}
+  @media (prefers-reduced-motion:reduce){.pulse{animation:none}}
   .credit a{color:var(--dim);text-decoration:underline;text-underline-offset:2px}
   .credit a:hover{color:var(--phos)}
 
@@ -95,6 +110,18 @@
     border-top:1px solid var(--line);font-size:10px;letter-spacing:.12em;
     text-transform:uppercase;color:var(--dim);cursor:pointer}
   .opt input{flex:0 0 auto;width:14px;height:14px;accent-color:var(--phos);cursor:pointer}
+
+  details.opts{border-top:1px solid var(--line)}
+  details.opts summary{display:flex;align-items:center;gap:10px;padding:11px 14px;
+    font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+    cursor:pointer;list-style:none;user-select:none}
+  details.opts summary::-webkit-details-marker{display:none}
+  details.opts summary:hover{color:var(--fg)}
+  details.opts summary:focus-visible{outline:2px solid var(--phos);outline-offset:-2px}
+  details.opts summary .state{color:var(--phos);opacity:.75;letter-spacing:.06em}
+  details.opts summary .chev{margin-left:auto;font-size:10px;
+    transition:transform .15s}
+  details.opts[open] summary .chev{transform:rotate(90deg)}
 
   /* layer 0: full-bleed flash behind the instrument
      layer 1: the unit, untouched and fully opaque
@@ -141,7 +168,7 @@
   </div>
 
   <div class="readout">
-    <div class="digits" id="digits">--:--<span class="tenth">.-</span></div>
+    <div class="digits" id="digits"><span id="dMain">--:--</span><span class="tenth" id="dFrac">.---</span></div>
     <div class="sub" id="sub"></div>
     <div class="bar"><span id="bar"></span></div>
   </div>
@@ -153,7 +180,7 @@
 
   <div class="setter" id="setTgt">
     <label for="tgt">Count to</label>
-    <input id="tgt" type="datetime-local" step="1">
+    <input id="tgt" type="time" step="1">
   </div>
 
   <div class="setter hidden" id="setDur">
@@ -175,20 +202,24 @@
     <button id="syncBtn">Sync</button>
   </div>
 
-  <label class="opt" for="flashOn">
-    <input type="checkbox" id="flashOn" checked>
-    Flash alert at zero
-  </label>
+  <details class="opts">
+    <summary>Alerts <span class="state" id="optState"></span><span class="chev">▶</span></summary>
 
-  <label class="opt" for="beepOn">
-    <input type="checkbox" id="beepOn" checked>
-    Beep on final five
-  </label>
+    <label class="opt" for="flashOn">
+      <input type="checkbox" id="flashOn" checked>
+      Flash alert at zero
+    </label>
 
-  <label class="opt" for="wakeOn">
-    <input type="checkbox" id="wakeOn" checked>
-    Keep screen awake while running
-  </label>
+    <label class="opt" for="beepOn">
+      <input type="checkbox" id="beepOn" checked>
+      Beep on final five
+    </label>
+
+    <label class="opt" for="wakeOn">
+      <input type="checkbox" id="wakeOn" checked>
+      Keep screen awake while running
+    </label>
+  </details>
 
   <p class="note" id="srcNote">Clock source: local device</p>
   <p class="note credit">Time sources:
@@ -284,6 +315,7 @@ class ClockSync {
   base = Date.now() - performance.now();   // epoch at perf origin
   uncertainty = Infinity;
   rtt = null;
+  synced = false;                          // true once a remote source answered
   dispersion = null;                       // spread across accepted samples
   source = 'local device';
   granularity = 0;
@@ -293,10 +325,23 @@ class ClockSync {
   #history = [];
   #lastAt = 0;
   #onChange = null;
+  #onStatus = null;
   #ranked = null;
   #sinceProbe = 0;
 
   onChange(fn) { this.#onChange = fn; return this; }
+  onStatus(fn) { this.#onStatus = fn; return this; }
+
+  /* A sync is six samples against one of five providers, preceded by a
+     warm-up and sometimes a full re-rank of every source. That is several
+     seconds of work behind a label that otherwise sits frozen on the last
+     result. Reporting the phase shows which provider is being talked to
+     and how far along it is, so a slow network reads as slow rather than
+     as broken. */
+  #say(phase, detail = '') {
+    this.status = { phase, detail };
+    this.#onStatus?.(this.status);
+  }
 
   // a dead or slow source must not stall the chain behind it
   async #fetch(url, ms = 2500) {
@@ -365,9 +410,11 @@ class ClockSync {
      have the requests contend for the same uplink and corrupt exactly
      the number being measured. */
   async #rank() {
+    const pool = SOURCES.filter(s => !s.fallback);
     const scored = [];
-    for (const src of SOURCES) {
-      if (src.fallback) continue;                  // last resort, never ranked
+    let n = 0;
+    for (const src of pool) {
+      this.#say('probing', `${src.name} (${++n}/${pool.length})`);
       if (!await this.#warm(src)) continue;        // unreachable, drop it
       try {
         const s = await this.#sample(src);
@@ -388,9 +435,11 @@ class ClockSync {
     this.#sinceProbe++;
 
     for (const src of (this.#ranked?.length ? this.#ranked : SOURCES)) {
+      this.#say('connecting', src.name);
       if (!await this.#warm(src)) continue;
       const good = [];
       for (let i = 0; i < samples; i++) {
+        this.#say('sampling', `${src.name} ${i + 1}/${samples}`);
         try { good.push(await this.#sample(src)); }
         catch { break; }
         await new Promise(r => setTimeout(r, 110));   // avoid burst throttling
@@ -410,6 +459,7 @@ class ClockSync {
       const prev = this.#history.at(-1);
       const at = performance.now();
 
+      this.synced = true;
       this.base = best.base;
       this.rtt = best.rtt;
       this.uncertainty = best.rtt / 2;
@@ -424,9 +474,12 @@ class ClockSync {
       }
       this.#history.push({ base: this.base, at });
       this.#lastAt = at;
+      this.#say('synced', src.name);
       this.#onChange?.(this);
       return this;
     }
+    this.synced = false;
+    this.#say('unsynced');
     this.source = 'local device (all sources unreachable)';
     this.#onChange?.(this);
     return this;
@@ -443,7 +496,7 @@ class ClockSync {
    the display corrects on the next frame.
    ================================================================= */
 
-const TENTH = 100;
+const STEP_MS = 1;      // one displayed unit = 1 ms
 
 class HiResCountdown {
   #end = 0; #remaining = 0; #rafId = null; #safety = null;
@@ -513,7 +566,12 @@ class HiResCountdown {
   };
 
   #emit(remaining) {
-    const step = Math.ceil(remaining / TENTH);   // 0.0 shows only at true zero
+    // ceil so a full 30.000 s reads 30.000 and .000 appears only at zero.
+    // At 1 ms resolution the gate no longer suppresses much — rAF fires
+    // every 8-16 ms, so nearly every frame carries a new value. The saving
+    // moved into onTick instead, where the minutes field is only rewritten
+    // when it actually changes.
+    const step = Math.ceil(remaining / STEP_MS);
     if (step === this.#lastStep) return;
     this.#lastStep = step;
     this.onTick?.(remaining, step);
@@ -765,9 +823,9 @@ class ScreenLock {
 
 /* ================= formatting ================= */
 
-function format(step) {
-  const tenth = step % 10;
-  let s = Math.floor(step / 10);
+function format(step) {              // step = remaining milliseconds, ceiled
+  const ms = step % 1000;
+  let s = (step - ms) / 1000;
   const sec = s % 60; s = (s - sec) / 60;
   const min = s % 60; s = (s - min) / 60;
   const hr  = s % 24;
@@ -776,21 +834,21 @@ function format(step) {
   const main = day ? `${day}d ${p(hr)}:${p(min)}:${p(sec)}`
              : hr  ? `${p(hr)}:${p(min)}:${p(sec)}`
              :       `${p(min)}:${p(sec)}`;
-  return { main, tenth };
+  return { main, frac: String(ms).padStart(3, '0') };
 }
 
 /* ================= wiring ================= */
 
 const $ = id => document.getElementById(id);
 const el = {
-  digits:$('digits'), sub:$('sub'), bar:$('bar'), led:$('led'),
+  digits:$('digits'), dMain:$('dMain'), dFrac:$('dFrac'), sub:$('sub'), bar:$('bar'), led:$('led'),
   fps:$('fps'), offset:$('offset'), unc:$('unc'), skew:$('skew'),
   start:$('startBtn'), pause:$('pauseBtn'), reset:$('resetBtn'), sync:$('syncBtn'),
   dur:$('dur'), tgt:$('tgt'), tabDur:$('tabDur'), tabTgt:$('tabTgt'),
   setDur:$('setDur'), setTgt:$('setTgt'), note:$('srcNote'),
   flash:$('flash'), flashOn:$('flashOn'), beepOn:$('beepOn'),
   wallTime:$('wallTime'), wallMeta:$('wallMeta'),
-  wakeOn:$('wakeOn'), awake:$('awake'),
+  wakeOn:$('wakeOn'), awake:$('awake'), optState:$('optState'),
   cue:document.querySelector('#cue b')
 };
 
@@ -808,13 +866,34 @@ if (!screenLock.supported) el.awake.className = 'tag na';
 let mode = 'target';
 let targetEpoch = null;
 
-const clock = new ClockSync().onChange(c => {
+/* Offset quality bands. The thresholds are not arbitrary: 100 ms is
+   roughly where a human notices a clock disagreeing, 1 s is where the
+   displayed second is simply wrong. Between those, the reading is usable
+   but not trustworthy for anything tight. */
+function offsetClass(ms) {
+  const a = Math.abs(ms);
+  return a < 100 ? 'q0' : a < 500 ? 'q1' : a < 1000 ? 'q2' : 'q3';
+}
+
+const clock = new ClockSync()
+  .onStatus(s => {
+    // in-flight phases paint amber with a pulse; the terminal phases are
+    // left to onChange, which has the full result to report
+    if (s.phase === 'synced' || s.phase === 'unsynced') return;
+    const verb = { probing:'Probing', connecting:'Connecting to', sampling:'Sampling' }[s.phase];
+    el.note.innerHTML =
+      `<span class="pulse"></span>Clock source: <span class="q1">${verb} ${s.detail}</span>`;
+  })
+  .onChange(c => {
   const drift = c.base - (Date.now() - performance.now());   // device error
   el.offset.textContent = Number.isFinite(drift) ? (drift >= 0 ? '+' : '') + drift.toFixed(0) : '—';
-  el.offset.className = Math.abs(drift) > 1000 ? 'bad' : Math.abs(drift) > 100 ? 'warn' : '';
+  el.offset.className = c.synced ? offsetClass(drift) : 'q3';
   el.unc.textContent = c.uncertainty === Infinity ? '—' : c.uncertainty.toFixed(0);
   el.skew.textContent = c.skewPpm === null ? '—' : c.skewPpm.toFixed(1);
-  el.note.textContent = `Clock source: ${c.source}` +
+
+  // green means a remote server answered, red means we are on the device
+  // clock alone — the one distinction that changes how much to trust it
+  el.note.innerHTML = `Clock source: <span class="${c.synced ? 'q0' : 'q3'}">${c.source}</span>` +
     (c.rtt ? ` · rtt ${c.rtt.toFixed(0)} ms` : '') +
     (c.timing === 'resource' ? ' · wire-timed' : ' · wall-timed') +
     (c.dispersion !== null ? ` · spread ${c.dispersion.toFixed(0)} ms` : '') +
@@ -823,13 +902,20 @@ const clock = new ClockSync().onChange(c => {
     ? 'Measured RTT, nearest first: ' + c.probeTable.join(' · ')
     : '';
   if (mode === 'target' && targetEpoch !== null) apply();   // deadline follows the sync
-});
+  });
+
+let lastMain = '';
 
 const timer = new HiResCountdown({
   onTick: (remaining, step) => {
     const f = format(step);
-    el.digits.innerHTML = `${f.main}<span class="tenth">.${f.tenth}</span>`;
-    el.bar.style.width = (remaining / timer.span * 100).toFixed(3) + '%';
+    // the ms field changes every frame, the mm:ss field once a second.
+    // Writing them separately avoids reparsing the whole digit string
+    // 120 times a second, which innerHTML would do.
+    if (f.main !== lastMain) { el.dMain.textContent = f.main; lastMain = f.main; }
+    el.dFrac.textContent = '.' + f.frac;
+    // scaleX composites; setting width would relayout the panel every frame
+    el.bar.style.transform = `scaleX(${(remaining / timer.span).toFixed(5)})`;
 
     const secs = Math.ceil(remaining / 1000);
     if (timer.running && secs >= 1 && secs <= 5) cue.show(String(secs));
@@ -866,7 +952,7 @@ function apply() {
     el.sub.textContent = '';
   } else {
     if (!el.tgt.value) { el.sub.textContent = 'Pick a target time'; return; }
-    targetEpoch = new Date(el.tgt.value).getTime();      // local wall time
+    targetEpoch = resolveTarget(el.tgt.value);           // next occurrence
     if (timer.running) {
       // resync moved the clock: slide the deadline, re-place the pips,
       // and leave the run state alone
@@ -886,10 +972,30 @@ function apply() {
   setState('idle');
 }
 
+/* A time with no date means the next occurrence of that time. Resolve it
+   against the synced clock, and roll to tomorrow once it has passed.
+
+   The roll uses setDate(+1) rather than adding 86400000 ms. Across a DST
+   boundary those disagree by an hour: "06:00 tomorrow" is 23 or 25 hours
+   away on switchover days, and only the calendar arithmetic keeps the
+   wall-clock time the user actually typed. */
+function resolveTarget(value) {
+  const [h, m, s = 0] = value.split(':').map(Number);
+  const now = clock.now();
+  const d = new Date(now);
+  d.setHours(h, m, s, 0);
+  if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
 function describeTarget(extra = '') {
   const unc = clock.uncertainty === Infinity ? '?' : clock.uncertainty.toFixed(0);
-  el.sub.textContent = new Date(targetEpoch).toLocaleString(undefined,
-    { dateStyle:'medium', timeStyle:'medium' }) + ` · ±${unc} ms` + extra;
+  const d = new Date(targetEpoch);
+  // the date is derived, not typed, so name the day rather than print it
+  const sameDay = d.toDateString() === new Date(clock.now()).toDateString();
+  const when = (sameDay ? 'Today' : 'Tomorrow') + ' ' +
+    d.toLocaleTimeString(undefined, { hour12:false, timeStyle:'medium' });
+  el.sub.textContent = `${when} · ±${unc} ms${extra}`;
 }
 
 /* Idle preview. A wall-clock deadline keeps approaching whether or not
@@ -910,7 +1016,7 @@ async function armTarget() {
   el.start.textContent = 'Syncing';
   await clock.sync({ samples: 4 });
 
-  targetEpoch = new Date(el.tgt.value).getTime();
+  targetEpoch = resolveTarget(el.tgt.value);             // re-resolve on arm
   const endPerf = targetEpoch - clock.base;             // epoch -> perf domain
   const remaining = endPerf - performance.now();
 
@@ -949,6 +1055,21 @@ el.pause.onclick  = () => { cue.hide(); beeper.cancel(); screenLock.release(); t
 el.reset.onclick  = () => { flash.stop(); cue.hide(); beeper.cancel(); screenLock.release(); timer.pause(); apply(); };
 el.beepOn.onchange = () => timer.running ? beeper.arm(timer.remaining) : beeper.cancel();
 el.wakeOn.onchange = () => el.wakeOn.checked ? screenLock.acquire() : screenLock.release();
+
+/* Collapsed panels hide state, which is how a muted alert goes unnoticed
+   until it fails to fire. The summary line reports what is armed, so the
+   group can stay shut without becoming opaque. */
+function optSummary() {
+  const on = [];
+  if (el.flashOn.checked) on.push('flash');
+  if (el.beepOn.checked)  on.push('beep');
+  if (el.wakeOn.checked)  on.push('awake');
+  el.optState.textContent = on.length ? on.join(' · ') : 'all off';
+}
+for (const box of [el.flashOn, el.beepOn, el.wakeOn]) {
+  box.addEventListener('change', optSummary);
+}
+optSummary();
 el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
 el.sync.onclick   = async () => {
@@ -960,9 +1081,9 @@ el.sync.onclick   = async () => {
 /* Default target: the next whole minute at least 30 s away. A round
    boundary is what a wall-clock deadline usually is, and the 30 s
    floor keeps the seed from landing seconds after page load. */
-const seedMs = Math.ceil((Date.now() + 30000) / 60000) * 60000;
-const seed = new Date(seedMs - new Date(seedMs).getTimezoneOffset() * 60000);
-el.tgt.value = seed.toISOString().slice(0, 19);
+const seed = new Date(Math.ceil((Date.now() + 30000) / 60000) * 60000);
+const pad = n => String(n).padStart(2, '0');
+el.tgt.value = `${pad(seed.getHours())}:${pad(seed.getMinutes())}:00`;
 
 /* Wall clock readout. Runs off the synced clock, not Date.now(), so the
    time on screen is the corrected one — and it is the same value the
@@ -1012,7 +1133,12 @@ function meter() {
   }
 }
 
-function paintIdle() {
+/* The wall clock is painted in both loops. It is the reference the
+   deadline was computed against, so hiding it during the run would
+   remove exactly the reading needed to check the countdown against
+   real time. The preview is idle-only: while running, the countdown
+   loop owns the digits. */
+function paintClock(withPreview) {
   const t = clock.now();
   const bucket = Math.floor(t / TEXT_MS);
   if (bucket === lastBucket) return;
@@ -1020,24 +1146,36 @@ function paintIdle() {
 
   el.wallTime.innerHTML = wallText(t);
   const off = clock.base - (Date.now() - performance.now());
-  el.wallMeta.innerHTML = clock.uncertainty === Infinity
-    ? `${TZ} · device clock, unsynced`
-    : `${TZ} · device ${off >= 0 ? '+' : ''}${off.toFixed(0)} ms · ±${clock.uncertainty.toFixed(0)} ms`;
+  el.wallMeta.innerHTML = clock.synced
+    ? `${TZ} · <span class="${offsetClass(off)}">device ${off >= 0 ? '+' : ''}${off.toFixed(0)} ms</span>` +
+      ` · ±${clock.uncertainty.toFixed(0)} ms`
+    : `${TZ} · <span class="q3">device clock, unsynced</span>`;
 
-  if (preview && mode === 'target' && targetEpoch !== null) {
+  if (!withPreview) return;
+
+  if (preview && mode === 'target' && el.tgt.value) {
+    // a time-only target rolls forward the moment it passes, so re-resolve
+    // every tick and reset the bar span when the day flips
+    const next = resolveTarget(el.tgt.value);
+    if (next !== targetEpoch) {
+      targetEpoch = next;
+      timer.span = Math.max(next - t, 1);
+      describeTarget();
+    }
     timer.load(Math.max(0, targetEpoch - t), timer.span);
   }
 }
 
 function idleLoop() {
   meter();
-  paintIdle();
+  paintClock(true);
   idleTimer = setTimeout(idleLoop, 1000 / IDLE_HZ);
 }
 
 function runLoop() {
   if (!timer.running) { rafId = null; return; }
   meter();
+  paintClock(false);        // clock still ticks at 2 Hz, gated the same way
   rafId = requestAnimationFrame(runLoop);
 }
 
