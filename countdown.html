@@ -311,11 +311,17 @@ const SOURCES = [
     } }
 ];
 
+/* What counts as a usable fix. A source that responds but scatters is
+   not "available" in any sense that matters — these bounds are what the
+   fallback chain tests against, not mere reachability. */
+const RELIABLE = { minSamples: 3, maxSpread: 150, maxRtt: 1200 };
+
 class ClockSync {
   base = Date.now() - performance.now();   // epoch at perf origin
   uncertainty = Infinity;
   rtt = null;
   synced = false;                          // true once a remote source answered
+  degraded = false;                        // synced, but below the quality bar
   dispersion = null;                       // spread across accepted samples
   source = 'local device';
   granularity = 0;
@@ -327,7 +333,6 @@ class ClockSync {
   #onChange = null;
   #onStatus = null;
   #ranked = null;
-  #sinceProbe = 0;
 
   onChange(fn) { this.#onChange = fn; return this; }
   onStatus(fn) { this.#onStatus = fn; return this; }
@@ -409,8 +414,8 @@ class ClockSync {
      warmed, then sampled once, sequentially: probing in parallel would
      have the requests contend for the same uplink and corrupt exactly
      the number being measured. */
-  async #rank() {
-    const pool = SOURCES.filter(s => !s.fallback);
+  async #rank({ skip = null } = {}) {
+    const pool = SOURCES.filter(s => !s.fallback && s !== skip);
     const scored = [];
     let n = 0;
     for (const src of pool) {
@@ -424,61 +429,108 @@ class ClockSync {
     scored.sort((a, b) => a.rtt - b.rtt);
     this.probeTable = scored.map(s => `${s.src.name} ${s.rtt.toFixed(0)}`);
     this.#ranked = [...scored.map(s => s.src), ...SOURCES.filter(s => s.fallback)];
-    this.#sinceProbe = 0;
     return this.#ranked;
   }
 
-  async sync({ samples = 6, reprobe = false } = {}) {
-    // re-rank on first use, on request, or when the ranking has aged out.
-    // Routing changes; the nearest edge ten minutes ago may not be now.
-    if (!this.#ranked || reprobe || this.#sinceProbe >= 10) await this.#rank();
-    this.#sinceProbe++;
+  // measure one source. Returns a candidate, or null if it gave nothing.
+  async #measure(src, samples) {
+    this.#say('connecting', src.name);
+    if (!await this.#warm(src)) return null;
 
-    for (const src of (this.#ranked?.length ? this.#ranked : SOURCES)) {
-      this.#say('connecting', src.name);
-      if (!await this.#warm(src)) continue;
-      const good = [];
-      for (let i = 0; i < samples; i++) {
-        this.#say('sampling', `${src.name} ${i + 1}/${samples}`);
-        try { good.push(await this.#sample(src)); }
-        catch { break; }
-        await new Promise(r => setTimeout(r, 110));   // avoid burst throttling
-      }
-      if (!good.length) continue;
+    const good = [];
+    for (let i = 0; i < samples; i++) {
+      this.#say('sampling', `${src.name} ${i + 1}/${samples}`);
+      try { good.push(await this.#sample(src)); }
+      catch { break; }
+      await new Promise(r => setTimeout(r, 110));   // avoid burst throttling
+    }
+    if (!good.length) return null;
 
-      // minimum-delay filter: the fastest round trip has the least room
-      // for the path asymmetry that Cristian's rtt/2 term cannot see
-      const best = good.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+    // minimum-delay filter: the fastest round trip has the least room
+    // for the path asymmetry that Cristian's rtt/2 term cannot see
+    const best = good.reduce((a, b) => (b.rtt < a.rtt ? b : a));
 
-      // agreement across samples is the honest error bar. A tight cluster
-      // over a fast path means the estimate is real; a wide spread means
-      // the half-RTT figure is flattering itself.
-      const bases = good.map(s => s.base).sort((x, y) => x - y);
-      const spread = bases.at(-1) - bases[0];
+    // agreement across samples is the honest error bar. A tight cluster
+    // over a fast path means the estimate is real; a wide spread means
+    // the half-RTT figure is flattering itself.
+    const bases = good.map(s => s.base).sort((x, y) => x - y);
+    return { src, best, spread: bases.at(-1) - bases[0], n: good.length };
+  }
 
-      const prev = this.#history.at(-1);
-      const at = performance.now();
+  /* Reliable means the source answered enough times and agreed with
+     itself. Reachability alone is not enough — a provider that responds
+     but whose samples scatter over half a second is worse than useless,
+     because it hands back a confident-looking offset built on noise. */
+  #reliable(c) {
+    return c && c.n >= RELIABLE.minSamples
+             && c.spread <= RELIABLE.maxSpread
+             && c.best.rtt <= RELIABLE.maxRtt;
+  }
 
-      this.synced = true;
-      this.base = best.base;
-      this.rtt = best.rtt;
-      this.uncertainty = best.rtt / 2;
-      this.dispersion = spread;
-      this.source = src.name;
-      this.timing = best.timing;
-      this.granularity = src.fallback ? 1000 : 1;   // Date header buckets to 1 s
+  #commit(c) {
+    const prev = this.#history.at(-1);
+    const at = performance.now();
 
-      // two syncs far enough apart expose the local crystal's rate error
-      if (prev && at - prev.at > 60000) {
-        this.skewPpm = ((this.base - prev.base) / (at - prev.at)) * 1e6;
-      }
-      this.#history.push({ base: this.base, at });
-      this.#lastAt = at;
-      this.#say('synced', src.name);
-      this.#onChange?.(this);
+    this.synced = true;
+    this.base = c.best.base;
+    this.rtt = c.best.rtt;
+    this.uncertainty = c.best.rtt / 2;
+    this.dispersion = c.spread;
+    this.source = c.src.name;
+    this.timing = c.best.timing;
+    this.granularity = c.src.fallback ? 1000 : 1;   // Date header buckets to 1 s
+    this.degraded = !this.#reliable(c);
+
+    // two syncs far enough apart expose the local crystal's rate error.
+    // Only meaningful when both came from the same path, so a source
+    // change resets the history rather than differencing across providers.
+    if (prev && prev.source === this.source && at - prev.at > 60000) {
+      this.skewPpm = ((this.base - prev.base) / (at - prev.at)) * 1e6;
+    } else if (prev && prev.source !== this.source) {
+      this.skewPpm = null;
+    }
+    this.#history.push({ base: this.base, at, source: this.source });
+    this.#lastAt = at;
+    this.#say('synced', c.src.name);
+    this.#onChange?.(this);
+  }
+
+  /* One source, every time: PRIMARY.
+     Probing every provider on each sync costs a request per source for a
+     result that rarely changes, and switching sources between syncs means
+     consecutive offsets carry different systematic errors — the countdown
+     would inherit a step every time the winner changed. Staying on one
+     provider also keeps the skew estimate meaningful, because it compares
+     two measurements of the same path rather than two different paths.
+
+     The alternates exist for one case: the primary came back unavailable
+     or unreliable. Only then is the RTT ranking worth its cost, since at
+     that point the question really is which of the remainder is nearest.
+     If nothing clears the quality bar, the best candidate seen is still
+     committed and flagged degraded — a noisy remote fix beats the
+     unsynced device clock, but the user should be told which they have. */
+  async sync({ samples = 6 } = {}) {
+    const primary = SOURCES[0];
+    const seen = [];
+
+    const first = await this.#measure(primary, samples);
+    if (this.#reliable(first)) { this.#commit(first); return this; }
+    if (first) seen.push(first);
+
+    await this.#rank({ skip: primary });
+    for (const src of this.#ranked) {
+      const c = await this.#measure(src, samples);
+      if (this.#reliable(c)) { this.#commit(c); return this; }
+      if (c) seen.push(c);
+    }
+
+    if (seen.length) {                     // nothing clean, take the least bad
+      this.#commit(seen.reduce((a, b) => (b.spread < a.spread ? b : a)));
       return this;
     }
+
     this.synced = false;
+    this.degraded = false;
     this.#say('unsynced');
     this.source = 'local device (all sources unreachable)';
     this.#onChange?.(this);
@@ -891,9 +943,11 @@ const clock = new ClockSync()
   el.unc.textContent = c.uncertainty === Infinity ? '—' : c.uncertainty.toFixed(0);
   el.skew.textContent = c.skewPpm === null ? '—' : c.skewPpm.toFixed(1);
 
-  // green means a remote server answered, red means we are on the device
-  // clock alone — the one distinction that changes how much to trust it
-  el.note.innerHTML = `Clock source: <span class="${c.synced ? 'q0' : 'q3'}">${c.source}</span>` +
+  // green means a remote server answered cleanly, amber means it answered
+  // but below the quality bar, red means we are on the device clock alone
+  const q = !c.synced ? 'q3' : c.degraded ? 'q1' : 'q0';
+  el.note.innerHTML = `Clock source: <span class="${q}">${c.source}</span>` +
+    (c.degraded ? ' <span class="q1">(degraded)</span>' : '') +
     (c.rtt ? ` · rtt ${c.rtt.toFixed(0)} ms` : '') +
     (c.timing === 'resource' ? ' · wire-timed' : ' · wall-timed') +
     (c.dispersion !== null ? ` · spread ${c.dispersion.toFixed(0)} ms` : '') +
@@ -1052,7 +1106,25 @@ el.start.onclick  = () => {
   beeper.arm(timer.remaining);
 };
 el.pause.onclick  = () => { cue.hide(); beeper.cancel(); screenLock.release(); timer.pause(); if (mode === 'target') startPreview(); };
-el.reset.onclick  = () => { flash.stop(); cue.hide(); beeper.cancel(); screenLock.release(); timer.pause(); apply(); };
+const pad2 = n => String(n).padStart(2, '0');
+
+/* Reset returns the target to the next whole hour. A reset is a "start
+   over from a clean value" action, and for a wall-clock deadline the
+   clean value is the top of the hour, not whatever was typed. Computed
+   from the synced clock and via setHours so it stays right across a DST
+   boundary. */
+function nextHour() {
+  const d = new Date(clock.now());
+  d.setHours(d.getHours() + 1, 0, 0, 0);
+  return `${pad2(d.getHours())}:00:00`;
+}
+
+el.reset.onclick  = () => {
+  flash.stop(); cue.hide(); beeper.cancel(); screenLock.release();
+  timer.pause();
+  if (mode === 'target') el.tgt.value = nextHour();
+  apply();
+};
 el.beepOn.onchange = () => timer.running ? beeper.arm(timer.remaining) : beeper.cancel();
 el.wakeOn.onchange = () => el.wakeOn.checked ? screenLock.acquire() : screenLock.release();
 
@@ -1074,7 +1146,7 @@ el.dur.onchange   = apply;
 el.tgt.onchange   = apply;
 el.sync.onclick   = async () => {
   el.sync.textContent = '···'; el.sync.disabled = true;
-  await clock.sync({ reprobe: true });   // manual sync re-ranks the providers
+  await clock.sync();                    // primary first, same as any other sync
   el.sync.textContent = 'Sync'; el.sync.disabled = false;
 };
 
@@ -1113,13 +1185,12 @@ function wallText(ms) {
    rAF because a gated rAF still wakes the compositor every frame — the
    browser can only skip the work if we never ask for the frame.
 
-   Text updates run at 2 Hz, gated on the 500 ms bucket. Sampling just
-   after the boundary keeps the tenths digit near .0 and .5 — within one
-   67 ms tick of it — so a slow refresh reads as deliberate rather than
-   as a digit wandering at random. */
+   Text updates run at 10 Hz, gated on the 100 ms bucket. The 15 Hz loop
+   ticks faster than that bucket, so no tenth is ever skipped — each one
+   is caught within a tick of its boundary. */
 
 const IDLE_HZ = 15;              // UI loop rate while parked
-const TEXT_MS = 500;             // wall clock + preview refresh, 2 Hz
+const TEXT_MS = 100;             // wall clock + preview refresh, 10 Hz
 
 let frames = 0, mark = performance.now(), lastBucket = -1;
 let idleTimer = null, rafId = null;
@@ -1175,7 +1246,7 @@ function idleLoop() {
 function runLoop() {
   if (!timer.running) { rafId = null; return; }
   meter();
-  paintClock(false);        // clock still ticks at 2 Hz, gated the same way
+  paintClock(false);        // clock ticks at 10 Hz, gated the same way
   rafId = requestAnimationFrame(runLoop);
 }
 
